@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CalcChat</title>
+  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">CalcChat</div>
+    <div class="auth-actions">
+      <button id="btn-open-auth" class="btn ghost">Sign in / Sign up</button>
+      <button id="btn-passcode" class="btn" hidden>Change Passcode</button>
+      <button id="btn-logout" class="btn danger" hidden>Logout</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- Calculator Lock Screen -->
+    <section id="calculator-screen" class="view active">
+      <div class="calc">
+        <div class="calc-display" id="calc-display">0</div>
+        <div class="calc-keys">
+          <button data-key="7">7</button>
+          <button data-key="8">8</button>
+          <button data-key="9">9</button>
+          <button data-key="C" class="muted">C</button>
+
+          <button data-key="4">4</button>
+          <button data-key="5">5</button>
+          <button data-key="6">6</button>
+          <button data-key="⌫" class="muted">⌫</button>
+
+          <button data-key="1">1</button>
+          <button data-key="2">2</button>
+          <button data-key="3">3</button>
+          <button data-key="=" class="primary">=</button>
+
+          <button data-key="0" class="wide">0</button>
+          <button data-key="," class="muted" disabled>,</button>
+          <button data-key="." class="muted" disabled>.</button>
+        </div>
+        <div id="lock-hint" class="hint">Sign in to set a passcode. After login, enter your passcode and press = to unlock.</div>
+      </div>
+    </section>
+
+    <!-- Chat Screen -->
+    <section id="chat-screen" class="view">
+        <div class="chat">
+          <aside class="sidebar">
+            <div class="me">
+              <div class="me-row">
+                <div class="avatar big" id="me-avatar"></div>
+                <div class="me-col">
+                <div class="me-name" id="me-username">Anonymous</div>
+                <div class="me-status" id="me-status">Offline</div>
+                </div>
+                <!-- Mobile-only Add Story icon next to profile avatar -->
+                <button id="btn-add-story-mobile" class="icon-btn mobile-only" title="Add Story" aria-label="Add Story">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+                    <path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="me-actions">
+                <button id="btn-edit-profile" class="btn ghost" type="button">Edit Profile</button>
+              </div>
+            </div>
+            <div class="search">
+              <input type="text" id="user-search" placeholder="Search users..." />
+            </div>
+            <ul id="user-list" class="user-list"></ul>
+          </aside>
+          <section class="conversation">
+            <div id="conversation-header" class="conversation-header">
+              <div class="peer">
+                <button id="btn-back" class="icon-btn mobile-only" title="Back" aria-label="Back">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <div class="avatar big" id="peer-avatar"></div>
+                <div class="meta">
+                  <div class="name" id="peer-name">Select a user to chat</div>
+                  <div class="status" id="peer-status"></div>
+                </div>
+              </div>
+              <div class="header-actions">
+                <button id="btn-add-story" class="icon-btn" title="Add Story" aria-label="Add Story">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+                    <path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <button class="icon-btn" title="More" aria-label="More">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="5" cy="12" r="2" fill="currentColor"/>
+                    <circle cx="12" cy="12" r="2" fill="currentColor"/>
+                    <circle cx="19" cy="12" r="2" fill="currentColor"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <!-- Stories Bar -->
+            <div id="stories-bar" class="stories-bar"></div>
+            <div id="messages" class="messages"></div>
+            <div id="reply-bar" class="reply-bar" hidden>
+                <div class="rb-left">
+                  <div class="rb-title" id="reply-title">Replying to</div>
+                  <div class="rb-body">
+                    <img id="reply-thumb" class="rb-thumb" alt="" hidden />
+                    <div id="reply-snippet" class="rb-snippet"></div>
+                  </div>
+                </div>
+                <button id="reply-cancel" class="icon-btn" type="button" aria-label="Cancel reply">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M6 6L18 18M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+            </div>
+            <form id="message-form" class="message-form" autocomplete="off">
+              <button id="btn-attach" class="icon-btn" type="button" title="Attach image" aria-label="Attach image">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M21 15V17C21 19.7614 18.7614 22 16 22H8C5.23858 22 3 19.7614 3 17V7C3 4.23858 5.23858 2 8 2H14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M17 3L21 7L12 16H8V12L17 3Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button id="btn-gif" class="icon-btn" type="button" title="GIFs & Stickers" aria-label="GIFs & Stickers">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="2"/>
+                  <path d="M7 9h3v6H7zM11 9h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <input id="image-input" type="file" accept="image/*" hidden />
+              <div class="input-wrap">
+                <textarea id="message-input" rows="1" placeholder="Message..."></textarea>
+              </div>
+              <button class="send-btn" type="submit" aria-label="Send">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M5 12L19 5L16 19L12 13L5 12Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </form>
+          </section>
+        </div>
+    </section>
+  </main>
+
+  <!-- GIF / Sticker Picker Modal -->
+  <dialog id="gif-modal" class="modal gif-modal">
+    <div class="modal-content">
+      <h3>Choose a GIF or Sticker</h3>
+      <div class="tabs" id="gif-tabs">
+        <button type="button" class="tab active" data-kind="gifs">GIFs</button>
+        <button type="button" class="tab" data-kind="stickers">Stickers</button>
+      </div>
+      <div class="field">
+        <input type="text" id="gif-search" placeholder="Search GIFs or stickers..." />
+      </div>
+      <div id="gif-grid" class="gif-grid"></div>
+      <div class="actions">
+        <button type="button" id="gif-close" class="btn ghost">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Story Viewer Modal -->
+  <dialog id="story-viewer" class="story-viewer modal">
+    <div class="sv-wrap" role="document">
+      <div class="sv-header">
+        <div class="sv-user">
+          <div class="avatar big" id="sv-avatar"></div>
+          <div class="meta">
+            <div class="name" id="sv-username">Story</div>
+            <div class="status" id="sv-timestamp"></div>
+          </div>
+        </div>
+        <button id="sv-close" class="icon-btn" aria-label="Close story">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 6L18 18M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="sv-content">
+        <img id="sv-media-img" alt="Story" hidden />
+        <video id="sv-media-video" playsinline controls hidden></video>
+        <div id="sv-caption" class="sv-caption" hidden></div>
+      </div>
+      <div class="sv-actions">
+        <button id="sv-prev" class="icon-btn" aria-label="Previous">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M15 18L9 12L15 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="sv-reply">
+          <input id="sv-reply-input" type="text" placeholder="Reply to story..." />
+          <button id="sv-reply-send" class="btn">Send</button>
+        </div>
+        <button id="sv-next" class="icon-btn" aria-label="Next">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9 18L15 12L9 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Add Story Modal -->
+  <dialog id="add-story-modal" class="modal">
+    <form class="modal-content story-form" id="add-story-form">
+      <h3>Add Story</h3>
+      <div id="story-dropzone" class="dropzone story-dropzone" tabindex="0" aria-label="Upload an image or video by clicking or dragging">
+        <div id="story-preview" class="story-preview" hidden>
+          <img id="story-preview-img" alt="Preview" hidden />
+          <video id="story-preview-video" muted loop playsinline hidden></video>
+        </div>
+        <div class="dz-text">
+          <div class="dz-title">Drop image/video here or</div>
+          <div class="dz-sub">PNG/JPG/GIF/MP4 up to 20 MB</div>
+        </div>
+        <button class="btn" type="button" id="btn-pick-story">Choose file</button>
+        <input type="file" id="story-file" accept="image/*,video/*" capture="environment" hidden />
+      </div>
+      <div class="file-meta" id="story-file-meta" hidden>
+        <span class="chip" id="story-filetype"></span>
+        <span class="chip" id="story-filename"></span>
+        <span class="chip" id="story-filesize"></span>
+        <button type="button" id="story-clear" class="icon-btn" title="Remove file" aria-label="Remove file">✕</button>
+      </div>
+      <div class="field">
+        <label for="story-caption">Caption (optional)</label>
+        <input type="text" id="story-caption" maxlength="140" placeholder="Say something..." />
+      </div>
+      <div class="progress" id="story-progress" hidden>
+        <div class="bar"></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="add-story-cancel" class="btn ghost">Cancel</button>
+        <button type="submit" id="add-story-submit" class="btn primary">Post</button>
+      </div>
+      <div class="help">Stories expire automatically after 24 hours.</div>
+    </form>
+  </dialog>
+
+  <!-- Auth Modal -->
+  <dialog id="auth-modal" class="modal">
+    <form method="dialog" class="modal-content" id="auth-forms">
+      <h2>Welcome to CalcChat</h2>
+      <p class="muted">Sign up or sign in with email and password.</p>
+
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="signup">Sign Up</button>
+        <button type="button" class="tab" data-tab="signin">Sign In</button>
+      </div>
+
+      <div id="signup" class="tab-panel active">
+        <div class="field">
+          <label for="signup-email">Email</label>
+          <input type="email" id="signup-email" class="with-icon" required />
+        </div>
+        <div class="field">
+          <label for="signup-username">Username</label>
+          <input type="text" id="signup-username" class="with-icon" minlength="2" maxlength="24" required />
+          <div class="help">2-24 characters</div>
+        </div>
+        <div class="field">
+          <label for="signup-password">Password</label>
+          <input type="password" id="signup-password" class="with-icon" minlength="6" required />
+          <div class="help">At least 6 characters</div>
+        </div>
+        <div class="field">
+          <label for="signup-passcode1">Passcode (optional)</label>
+          <input type="password" id="signup-passcode1" inputmode="numeric" pattern="[0-9]*" minlength="4" placeholder="4+ digits" />
+        </div>
+        <div class="field">
+          <label for="signup-passcode2">Confirm Passcode</label>
+          <input type="password" id="signup-passcode2" inputmode="numeric" pattern="[0-9]*" minlength="4" placeholder="Re-enter passcode" />
+          <div class="help">If provided, must be at least 4 digits and both fields must match.</div>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" data-close-auth value="close">Close</button>
+          <button type="button" id="btn-signup" class="btn primary">Create Account</button>
+        </div>
+      </div>
+
+      <div id="signin" class="tab-panel">
+        <div class="field">
+          <label for="signin-email">Email</label>
+          <input type="email" id="signin-email" class="with-icon" required />
+        </div>
+        <div class="field">
+          <label for="signin-password">Password</label>
+          <input type="password" id="signin-password" class="with-icon" required />
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" data-close-auth value="close">Close</button>
+          <button type="button" id="btn-signin" class="btn primary">Sign In</button>
+        </div>
+      </div>
+
+      <p id="auth-error" class="error" hidden></p>
+    </form>
+  </dialog>
+
+  <!-- Profile Edit Modal -->
+  <dialog id="profile-modal" class="modal">
+    <form method="dialog" class="modal-content" id="profile-form">
+      <h3>Edit profile</h3>
+      <div class="profile-grid">
+        <div class="field">
+          <label for="profile-username">Username</label>
+          <input type="text" id="profile-username" minlength="2" maxlength="24" required />
+          <div class="help">2-24 characters</div>
+        </div>
+        <div class="field">
+          <label>Avatar</label>
+          <div id="profile-dropzone" class="dropzone" tabindex="0" aria-label="Upload avatar by clicking or dragging an image">
+            <div class="avatar big" id="profile-preview"></div>
+            <div class="dz-text">
+              <div class="dz-title">Drop image here or</div>
+              <div class="dz-sub">PNG/JPG up to 3 MB, square preferred</div>
+            </div>
+          </div>
+          <input type="file" id="profile-avatar" accept="image/*" hidden />
+          <div class="actions" style="margin-top:10px;">
+            <button type="button" id="btn-upload-avatar" class="btn">Upload image</button>
+            <button type="button" id="btn-remove-avatar" class="btn ghost">Remove avatar</button>
+          </div>
+        </div>
+      </div>
+      <p id="profile-error" class="error" hidden></p>
+      <div class="actions">
+        <button id="profile-close" class="btn ghost" value="close" type="button">Close</button>
+        <button type="submit" id="btn-save-profile" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Passcode Setup Modal -->
+  <dialog id="passcode-modal" class="modal">
+    <form method="dialog" class="modal-content" id="passcode-form">
+      <h3>Set your calculator passcode</h3>
+      <div class="field">
+        <label for="passcode1">Passcode (digits only)</label>
+        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode1" minlength="4" required />
+        <div class="help">Minimum 4 digits. Use the calculator then press = to unlock.</div>
+      </div>
+      <div class="field">
+        <label for="passcode2">Confirm Passcode</label>
+        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode2" minlength="4" required />
+      </div>
+      <p id="passcode-error" class="error" hidden></p>
+      <div class="actions">
+        <button id="passcode-close" class="btn ghost" type="button">Close</button>
+        <button id="btn-save-passcode" type="submit" class="btn primary">Save Passcode</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Image Viewer -->
+  <dialog id="image-viewer" class="image-viewer">
+    <div class="iv-wrap" role="document">
+      <button id="iv-close" class="icon-btn iv-close" aria-label="Close image">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 6L18 18M6 18L18 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <img id="iv-img" alt="Image preview" />
+    </div>
+  </dialog>
+
+  <script src="config.js"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+  <script src="supabaseClient.js"></script>
+  <script src="app.js"></script>
+
+  <!-- Toasts -->
+  <div id="toasts" class="toasts"></div>
+</body>
+</html>
