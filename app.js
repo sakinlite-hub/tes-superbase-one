@@ -203,7 +203,22 @@ function setAvatar(el, name, url) {
 function updatePeerHeader(user) {
   if (!user) return;
   peerName.textContent = user.username || 'User';
-  peerStatus.textContent = user.is_online ? 'Active now' : (user.last_active ? formatTimeAgo(user.last_active) : 'Offline');
+  // Prefer recent heartbeat or warmup for instant header updates, fallback to recency and DB flag
+  try {
+    const uid = String(user.id || '');
+    const now = Date.now();
+    const lastHb = uid ? (presenceHeartbeats.get(uid) || 0) : 0;
+    const hbOnline = lastHb && (now - lastHb) <= 2500;
+    const firstSeen = uid ? (presenceFirstSeenAt.get(uid) || 0) : 0;
+    const inWarmup = firstSeen && (now - firstSeen) < 3000;
+    const lastRaw = user.last_active || '';
+    const recent = lastRaw ? ((now - new Date(lastRaw).getTime()) < 5000) : false;
+    const online = hbOnline || inWarmup || recent || !!user.is_online;
+    peerStatus.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
+  } catch {
+    // Fallback
+    peerStatus.textContent = isOnlineFrom(user) ? 'Active now' : (user.last_active ? formatTimeAgo(user.last_active) : 'Offline');
+  }
   setAvatar(peerAvatar, user.username || 'User', user.avatar_url);
   try { if (peerAvatar && user.id) { peerAvatar.dataset.userId = user.id; decorateAvatarWithStory(peerAvatar, user.id); } } catch {}
 }
@@ -266,9 +281,66 @@ const passErr = document.getElementById('passcode-error');
 const passcodeClose = document.getElementById('passcode-close');
 const btnSavePasscode = document.getElementById('btn-save-passcode');
 
+// Password visibility toggles and strength meter
+const visibilityToggles = document.querySelectorAll('.toggle-visibility');
+visibilityToggles.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const id = btn.getAttribute('data-target');
+    const input = document.getElementById(id);
+    if (!input) return;
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.setAttribute('aria-pressed', String(!showing));
+  });
+});
+
+const pwStrengthEl = document.getElementById('pw-strength');
+function updatePwStrength() {
+  if (!pwStrengthEl || !signupPassword) return;
+  const pw = signupPassword.value || '';
+  let score = 0;
+  if (pw.length >= 6) score++;
+  if (pw.length >= 10) score++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw) || /[^A-Za-z]/.test(pw)) score++;
+  if (score > 4) score = 4;
+  const labels = ['Too weak','Weak','Fair','Good','Strong'];
+  const percent = Math.max(0, Math.min(100, Math.round((score/4)*100)));
+  pwStrengthEl.classList.remove('score-0','score-1','score-2','score-3','score-4');
+  pwStrengthEl.classList.add(`score-${score}`);
+  pwStrengthEl.innerHTML = `
+    <div class="strength-bar"><div class="fill" style="width:${percent}%"></div></div>
+    <div class="strength-label">${labels[score]}</div>
+  `;
+}
+if (signupPassword) {
+  signupPassword.addEventListener('input', updatePwStrength);
+  // initialize on load in case browser restores value
+  setTimeout(updatePwStrength, 0);
+}
+
+// Enforce numeric-only input for all passcode fields
+(function enforceNumericPasscodeInputs(){
+  const enforce = (el) => {
+    if (!el) return;
+    try { el.setAttribute('inputmode','numeric'); el.setAttribute('pattern','[0-9]*'); } catch {}
+    el.addEventListener('input', () => {
+      // strip non-digits and enforce maxlength if present
+      let v = (el.value || '').replace(/\D+/g,'');
+      const ml = el.maxLength && el.maxLength > 0 ? el.maxLength : null;
+      if (ml) v = v.slice(0, ml);
+      if (el.value !== v) el.value = v;
+      // clear error state while typing
+      try { el.removeAttribute('aria-invalid'); el.classList.remove('input-error'); } catch {}
+    });
+  };
+  enforce(signupPass1); enforce(signupPass2); enforce(pass1); enforce(pass2);
+})();
+
 const meUsername = document.getElementById('me-username');
 const meStatus = document.getElementById('me-status');
 const meAvatar = document.getElementById('me-avatar');
+const meSection = document.querySelector('.me');
 const userList = document.getElementById('user-list');
 const userSearch = document.getElementById('user-search');
 const convoHeader = document.getElementById('conversation-header');
@@ -444,7 +516,8 @@ function setStoryFileFromDrop(file) {
 // Event wiring
 if (addStoryForm) addStoryForm.addEventListener('submit', handleAddStorySubmit);
 if (addStoryCancel) addStoryCancel.addEventListener('click', () => { try { addStoryModal?.close(); } catch {} });
-if (btnPickStory) btnPickStory.addEventListener('click', () => addStoryFile?.click());
+// Clicking the button inside the dropzone must not bubble to the dropzone's click handler
+if (btnPickStory) btnPickStory.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); addStoryFile?.click(); });
 if (storyClearBtn) storyClearBtn.addEventListener('click', () => { if (addStoryFile) addStoryFile.value = ''; updateStoryUIForFile(null); });
 if (addStoryFile) addStoryFile.addEventListener('change', () => updateStoryUIForFile(addStoryFile.files?.[0]));
 if (storyDropzone) {
@@ -463,7 +536,12 @@ if (storyDropzone) {
   storyDropzone.addEventListener('dragover', over);
   storyDropzone.addEventListener('dragleave', leave);
   storyDropzone.addEventListener('drop', drop);
-  storyDropzone.addEventListener('click', () => addStoryFile?.click());
+  // Only trigger when clicking the dropzone area itself, not the inner button
+  storyDropzone.addEventListener('click', (e) => {
+    const fromBtn = e.target && e.target.closest && e.target.closest('#btn-pick-story');
+    if (fromBtn) return; // button handler already triggered
+    addStoryFile?.click();
+  });
 }
 
 // Open story viewer when clicking any avatar that has a story
@@ -496,6 +574,11 @@ async function getCurrentUserSafe() {
 function show(view) {
   for (const v of document.querySelectorAll('.view')) v.classList.remove('active');
   view.classList.add('active');
+  // Toggle body class for mobile header only when a conversation is open
+  try {
+    const inboxOpen = (view === chatScreen) && chatScreen.classList.contains('show-convo');
+    document.body.classList.toggle('chat-inbox', inboxOpen);
+  } catch {}
   updatePasscodeButtonVisibility();
 }
 function isLoggedIn(){ return !!currentUser; }
@@ -515,6 +598,7 @@ function setLoggedInUI(loggedIn) {
     meUsername.textContent = 'Anonymous';
     meStatus.textContent = 'Offline';
     setAvatar(meAvatar, 'Anonymous', null);
+    try { meSection?.classList.remove('online'); } catch {}
   }
 }
 function shake(el) {
@@ -548,7 +632,7 @@ function renderTikTokEmbed(url) {
   s.src = 'https://www.tiktok.com/embed.js';
   s.async = true;
   document.body.appendChild(s);
-  return wrap;
+  return w;
 }
 
 // Toasts
@@ -565,39 +649,132 @@ function toast(type, title, msg) {
 // Calculator state
 let input = '';
 function updateDisplay() {
-  calcDisplay.textContent = input || '0';
+  if (!input) { calcDisplay.textContent = '0'; return; }
+  const hasOp = /[+\-*/]/.test(input);
+  // Do not show preview for passcode-like input (digits only)
+  if (hasOp && !/^[0-9]{4,}$/.test(input)) {
+    const val = evalExpression(input);
+    if (val !== null) { calcDisplay.textContent = `${input} = ${val}`; return; }
+  }
+  calcDisplay.textContent = input;
 }
-calcKeys.forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const k = btn.dataset.key;
-    if (k === 'C') { input = ''; }
-    else if (k === '⌫') { input = input.slice(0, -1); }
-    else if (k === '=') {
-      if (!session) {
-        // calculator mode before login
-        try {
-          // simple calc: eval digits only
-          calcDisplay.textContent = input || '0';
-        } catch {}
-        return;
-      }
-      // verify passcode
-      if (!input) return;
-      const { data, error } = await sb.rpc('verify_passcode', { passcode: input });
-      if (error) {
-        console.error(error); shake(calcDisplay); return;
-      }
-      if (data === true) {
-        input = ''; updateDisplay();
-        await enterChat();
-      } else {
-        shake(calcDisplay);
-      }
-    } else {
-      if (/^[0-9]$/.test(k)) input += k;
+
+// Helpers for safe calculation
+const isOp = (c) => ['+','-','*','/'].includes(c);
+function canAppendDot(expr) {
+  // allow one dot per current number segment
+  const seg = (expr || '').split(/[+\-*/]/).pop();
+  return seg.indexOf('.') === -1;
+}
+function sanitizeAppend(expr, key) {
+  if (!expr) {
+    if (isOp(key)) return '';// don't start with operator
+    if (key === '.') return '0.';
+    return key;
+  }
+  const last = expr.slice(-1);
+  if (isOp(key)) {
+    // prevent two operators; replace last operator
+    if (isOp(last)) return expr.slice(0, -1) + key;
+    if (last === '.') return expr; // don't allow op right after dot
+    return expr + key;
+  }
+  if (key === '.') {
+    return canAppendDot(expr) ? (expr + '.') : expr;
+  }
+  // digits
+  if (/^[0-9]$/.test(key)) return expr + key;
+  return expr;
+}
+
+function evalExpression(expr) {
+  // Only allow digits, operators, dots, and spaces
+  if (!/^[-+*/0-9.\s]+$/.test(expr)) return null;
+  // Disallow sequences like **, //, ++, --, ..
+  if (/([+\-*/]{2,})|\.\./.test(expr)) return null;
+  // Remove trailing operator/dot before evaluation
+  let e = expr.replace(/\s+/g,'');
+  while (e && (isOp(e.slice(-1)) || e.slice(-1) === '.')) e = e.slice(0,-1);
+  if (!e) return null;
+  // Shunting-yard to RPN then evaluate
+  const out = [];
+  const ops = [];
+  const prec = { '+':1, '-':1, '*':2, '/':2 };
+  let num = '';
+  for (let i=0;i<e.length;i++) {
+    const ch = e[i];
+    if (/[0-9.]/.test(ch)) { num += ch; continue; }
+    if (isOp(ch)) {
+      if (num !== '') { out.push(parseFloat(num)); num = ''; }
+      while (ops.length && prec[ops[ops.length-1]] >= prec[ch]) out.push(ops.pop());
+      ops.push(ch);
+      continue;
     }
-    updateDisplay();
-  });
+    // invalid
+    return null;
+  }
+  if (num !== '') out.push(parseFloat(num));
+  while (ops.length) out.push(ops.pop());
+  const st = [];
+  for (const tok of out) {
+    if (typeof tok === 'number') { st.push(tok); continue; }
+    const b = st.pop(); const a = st.pop();
+    if (a === undefined || b === undefined) return null;
+    let v = null;
+    if (tok === '+') v = a + b;
+    else if (tok === '-') v = a - b;
+    else if (tok === '*') v = a * b;
+    else if (tok === '/') v = b === 0 ? Infinity : a / b;
+    st.push(v);
+  }
+  const res = st.pop();
+  if (st.length) return null;
+  if (!isFinite(res)) return null;
+  // limit precision
+  return parseFloat(Number(res).toFixed(10)) * 1; // coerce -0 to 0
+}
+
+async function handleEqual() {
+  if (!input) { updateDisplay(); return; }
+  // Unlock if logged in and input is digits-only (4+)
+  if (session && /^[0-9]{4,}$/.test(input)) {
+    const { data, error } = await sb.rpc('verify_passcode', { passcode: input });
+    if (error) { console.error(error); shake(calcDisplay); return; }
+    if (data === true) { input = ''; updateDisplay(); await enterChat(); return; }
+    shake(calcDisplay); return;
+  }
+  // Otherwise evaluate expression
+  const val = evalExpression(input);
+  if (val === null) { shake(calcDisplay); return; }
+  input = String(val);
+  updateDisplay();
+}
+
+function handleKey(key) {
+  if (key === 'C') { input = ''; updateDisplay(); return; }
+  if (key === '⌫') { input = input.slice(0,-1); updateDisplay(); return; }
+  if (key === '=') { handleEqual(); return; }
+  input = sanitizeAppend(input, key);
+  updateDisplay();
+}
+
+calcKeys.forEach(btn => {
+  btn.addEventListener('click', () => handleKey(btn.dataset.key));
+});
+
+// Keyboard input
+window.addEventListener('keydown', (e) => {
+  // Ignore typing when focus is inside an input/textarea/contenteditable
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  // Only handle keys when the calculator screen is visible
+  if (!calculatorScreen?.classList.contains('active')) return;
+
+  const k = e.key;
+  if (/^[0-9]$/.test(k)) { e.preventDefault(); handleKey(k); }
+  else if (k === 'Backspace') { e.preventDefault(); handleKey('⌫'); }
+  else if (k === 'Enter' || k === '=') { e.preventDefault(); handleKey('='); }
+  else if (k === '.' || k === '+' || k === '-' || k === '*' || k === '/') { e.preventDefault(); handleKey(k); }
 });
 
 // Auth modal tabs
@@ -858,7 +1035,27 @@ btnSignup.addEventListener('click', async () => {
   const email = signupEmail.value.trim();
   const username = signupUsername.value.trim();
   const password = signupPassword.value;
-  if (!email || !username || !password) return;
+  // Require passcode at signup
+  const p1 = signupPass1?.value?.trim() || '';
+  const p2 = signupPass2?.value?.trim() || '';
+  // reset error states
+  [signupEmail, signupUsername, signupPassword, signupPass1, signupPass2].forEach(el => { try { el.removeAttribute('aria-invalid'); el.classList.remove('input-error'); } catch {} });
+  if (!email || !username || !password) {
+    if (!email) signupEmail.setAttribute('aria-invalid','true');
+    if (!username) signupUsername.setAttribute('aria-invalid','true');
+    if (!password) signupPassword.setAttribute('aria-invalid','true');
+    signupPass1.setAttribute('aria-invalid', String(!/^[0-9]{4,}$/.test(p1)));
+    signupPass2.setAttribute('aria-invalid', String(p1 !== p2));
+    authError.textContent = 'Fill in email, username, password, and a valid passcode.';
+    authError.hidden = false; return;
+  }
+  if (!/^[0-9]{4,}$/.test(p1) || p1 !== p2) {
+    if (!/^[0-9]{4,}$/.test(p1)) signupPass1.setAttribute('aria-invalid','true');
+    if (p1 !== p2) signupPass2.setAttribute('aria-invalid','true');
+    authError.textContent = 'Enter a numeric passcode (at least 4 digits) and confirm it.';
+    authError.hidden = false;
+    return;
+  }
   btnSignup.disabled = true; btnSignup.textContent = 'Creating...';
   try {
     const { data, error } = await sb.auth.signUp({ email, password, options: { data: { username } } });
@@ -867,15 +1064,11 @@ btnSignup.addEventListener('click', async () => {
     if (data?.session) {
       await refreshSession();
       await ensureProfile(username);
-      // If user provided a valid passcode during signup, set it now
-      const p1 = signupPass1?.value?.trim() || '';
-      const p2 = signupPass2?.value?.trim() || '';
-      if (p1 && /^[0-9]{4,}$/.test(p1) && p1 === p2) {
-        const { error: pcErr } = await sb.rpc('set_passcode', { passcode: p1 });
-        if (!pcErr) {
-          const { data: me } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
-          meProfile = me;
-        }
+      // Set required passcode now
+      const { error: pcErr } = await sb.rpc('set_passcode', { passcode: p1 });
+      if (!pcErr) {
+        const { data: me } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
+        meProfile = me;
       }
       toast('success','Account created','You are signed in.');
       authModal.close();
@@ -884,14 +1077,8 @@ btnSignup.addEventListener('click', async () => {
       return;
     }
     // If session missing, attempt immediate sign in
-    // Stash pending passcode to apply right after sign-in
-    (function stashPendingPasscode(){
-      const p1 = signupPass1?.value?.trim() || '';
-      const p2 = signupPass2?.value?.trim() || '';
-      if (p1 && /^[0-9]{4,}$/.test(p1) && p1 === p2) {
-        try { sessionStorage.setItem('pending_passcode', p1); } catch {}
-      }
-    })();
+    // Stash required passcode to apply right after sign-in
+    try { sessionStorage.setItem('pending_passcode', p1); } catch {}
     const { error: siErr } = await sb.auth.signInWithPassword({ email, password });
     if (siErr) {
       toast('success','Account created','Now sign in with your credentials.');
@@ -926,6 +1113,7 @@ btnLogout.addEventListener('click', async () => {
   await sb.auth.signOut();
   session = null; currentUser = null; meProfile = null; activePeerId = null;
   setLoggedInUI(false);
+  teardownPresence();
   show(calculatorScreen);
   toast('success','Signed out','You have been logged out.');
 });
@@ -1019,6 +1207,12 @@ async function setPresence(online) {
     await sb.from('profiles').update(payload).eq('id', meUser.id);
     // Reflect in UI immediately
     if (meStatus) meStatus.textContent = online ? 'Online' : 'Offline';
+    try { meSection?.classList.toggle('online', !!online); } catch {}
+    // Broadcast presence instantly to other clients
+    try {
+      ensurePresenceBus();
+      presenceBus.send({ type: 'broadcast', event: 'presence', payload: { id: meUser.id, is_online: !!online, last_active: payload.last_active } });
+    } catch {}
   } catch {}
 }
 let userListChan = null;
@@ -1029,6 +1223,206 @@ const typingTimers = new Map(); // peerId -> timeout id for list indicator
 let convoTypingEl = null;
 let convoTypingTimer = null;
 let typingLastSentAt = 0;
+let presenceBus = null; // realtime presence broadcast channel
+let presenceBusHeartbeatTimer = null;
+let presenceBusMonitorTimer = null;
+const presenceHeartbeats = new Map(); // userId -> last seen ms
+let presenceActivityHandlerBound = false;
+let lastActivityHbSentAt = 0;
+const presenceMisses = new Map(); // userId -> consecutive offline checks
+let presenceActivityHandlerFn = null;
+const presenceFirstSeenAt = new Map(); // userId -> first time we rendered/observed this user
+const PRESENCE_DEBUG = false; // flip to true to see detailed presence logs
+function dbgPresence(...args) { try { if (PRESENCE_DEBUG) console.debug('[presence]', ...args); } catch {} }
+
+// Presence realtime and lifecycle
+let presenceChan = null;
+let presenceHeartbeat = null;
+let presenceHandlersBound = false;
+let presenceRecencyTicker = null;
+let presencePolling = null;
+
+// Treat a user as online if explicit flag is true OR last_active is recent
+function isOnlineFrom(u) {
+  try {
+    const last = u?.last_active ? new Date(u.last_active).getTime() : 0;
+    const recent = last && (Date.now() - last) < 5 * 1000; // 5s window for snappy UX
+    return !!(u?.is_online || recent);
+  } catch { return !!u?.is_online; }
+}
+
+function updatePresenceUIForUser(u) {
+  try {
+    // Update user list dot and status text (if status shows presence, not a message snippet)
+    const li = userList?.querySelector(`li[data-user-id="${u.id}"]`);
+    if (li) {
+      // persist latest raw values for recency ticker
+      if (typeof u.last_active !== 'undefined') li.dataset.lastActive = u.last_active || '';
+      if (typeof u.is_online !== 'undefined') li.dataset.isOnline = String(!!u.is_online);
+      // If we've seen a recent heartbeat (or within warmup) for this user, prefer that over DB payload to prevent flicker
+      const uid = String(u.id);
+      const now = Date.now();
+      const lastHb = presenceHeartbeats.get(uid) || 0;
+      const hbOnline = (now - lastHb) <= 2500;
+      const firstSeen = presenceFirstSeenAt.get(uid) || 0;
+      const inWarmup = firstSeen && (now - firstSeen) < 3000;
+      const online = hbOnline || inWarmup ? true : isOnlineFrom(u);
+      const dot = li.querySelector('.status-dot');
+      if (dot) {
+        dot.classList.toggle('online', online);
+        dot.classList.toggle('offline', !online);
+        dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
+      }
+      const statusEl = li.querySelector('.status');
+      if (statusEl) {
+        const cur = statusEl.textContent || '';
+        const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
+        if (!isSnippet) {
+          statusEl.textContent = online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
+        }
+      }
+    }
+    // Update conversation header if this is the active peer
+    if (activePeerId && u.id === activePeerId) updatePeerHeader(u);
+  } catch {}
+}
+
+function subscribePresence() {
+  try {
+    if (presenceChan) return;
+    presenceChan = sb.channel('presence-profiles')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles' }, (p) => {
+        const u = p?.new; if (!u || !u.id) return; updatePresenceUIForUser(u);
+      })
+      .subscribe((status) => {
+        try {
+          if (status === 'SUBSCRIBED') {
+            // Send a heartbeat immediately after the channel is ready so peers don't see a gray gap
+            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } });
+          }
+        } catch {}
+      });
+  } catch (e) { console.warn('subscribePresence failed', e); }
+}
+
+function teardownPresence() {
+  try { if (presenceChan) { sb.removeChannel(presenceChan); presenceChan = null; } } catch {}
+  try { if (presenceHeartbeat) { clearInterval(presenceHeartbeat); presenceHeartbeat = null; } } catch {}
+  stopPresenceRecencyTicker();
+  stopPresencePolling();
+  try { if (presenceBus) { sb.removeChannel(presenceBus); presenceBus = null; } } catch {}
+  stopPresenceBusHeartbeat();
+  stopPresenceBusMonitor();
+  stopPresenceActivityPings();
+  try { presenceHeartbeats.clear(); } catch {}
+  try { presenceMisses.clear(); } catch {}
+  try { presenceFirstSeenAt.clear(); } catch {}
+}
+
+function bindPresenceWindowHandlers() {
+  try {
+    if (presenceHandlersBound) return; presenceHandlersBound = true;
+    try {
+      document.addEventListener('visibilitychange', () => {
+        try {
+          if (document.visibilityState === 'visible') {
+            setPresence(true);
+          } else {
+            // Do not immediately set offline on hide; rely on heartbeats and unload
+          }
+        } catch {}
+      });
+      const bye = () => {
+        try { ensurePresenceBus(); dbgPresence('send bye'); presenceBus?.send({ type: 'broadcast', event: 'presence-bye', payload: { id: String(currentUser?.id || '') } }); } catch {}
+        try { navigator.sendBeacon ? navigator.sendBeacon('/') : null; } catch {}
+        try { setPresence(false); } catch {}
+      };
+      window.addEventListener('beforeunload', bye);
+      window.addEventListener('pagehide', bye);
+    } catch {}
+  } catch {}
+}
+
+function startPresenceHeartbeat() {
+  try {
+    if (presenceHeartbeat) return;
+    // More frequent heartbeat for snappier presence updates
+    presenceHeartbeat = setInterval(() => { try { setPresence(true); } catch {} }, 15 * 1000);
+  } catch {}
+}
+
+function startPresenceRecencyTicker() {
+  try {
+    if (presenceRecencyTicker) return;
+    presenceRecencyTicker = setInterval(() => {
+      try {
+        if (!userList) return;
+        userList.querySelectorAll('li[data-user-id]').forEach(li => {
+          const uid = li.dataset.userId;
+          const lastRaw = li.dataset.lastActive || '';
+          const isOnlineFlag = li.dataset.isOnline === 'true';
+          const last = lastRaw ? new Date(lastRaw).getTime() : 0;
+          const recent = last && (Date.now() - last) < 5 * 1000; // match isOnlineFrom window
+          const online = isOnlineFlag || recent;
+          const hasHb = uid ? presenceHeartbeats.has(uid) : false;
+          // Only update the dot from recency if we have never seen a heartbeat for this user
+          if (!hasHb) {
+            const dot = li.querySelector('.status-dot');
+            if (dot) {
+              dot.classList.toggle('online', online);
+              dot.classList.toggle('offline', !online);
+              dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
+            }
+          }
+          // Always keep status text fresh (unless showing a message snippet)
+          const statusEl = li.querySelector('.status');
+          if (statusEl) {
+            const cur = statusEl.textContent || '';
+            const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
+            if (!isSnippet) {
+              statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
+            }
+          }
+          // If this is the active peer, refresh the conversation header status as well
+          if (activePeerId && uid === String(activePeerId) && peerStatus) {
+            const now = Date.now();
+            const lastHb = presenceHeartbeats.get(uid) || 0;
+            const hbOnline = (now - lastHb) <= 2500;
+            const firstSeen = presenceFirstSeenAt.get(uid) || 0;
+            const inWarmup = firstSeen && (now - firstSeen) < 3000;
+            const headerOnline = hbOnline || inWarmup || online;
+            peerStatus.textContent = headerOnline ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
+          }
+        });
+      } catch {}
+    }, 1 * 1000);
+  } catch {}
+}
+
+function stopPresenceRecencyTicker() {
+  try { if (presenceRecencyTicker) { clearInterval(presenceRecencyTicker); presenceRecencyTicker = null; } } catch {}
+}
+
+function startPresencePolling() {
+  try {
+    if (presencePolling) return;
+    presencePolling = setInterval(async () => {
+      try {
+        const { data } = await sb.rpc('get_public_profiles');
+        if (!Array.isArray(data)) return;
+        const meUser = await getCurrentUserSafe();
+        data.forEach(u => {
+          if (meUser && u.id === meUser.id) return; // skip self
+          updatePresenceUIForUser(u);
+        });
+      } catch {}
+    }, 30 * 1000);
+  } catch {}
+}
+
+function stopPresencePolling() {
+  try { if (presencePolling) { clearInterval(presencePolling); presencePolling = null; } } catch {}
+}
 
 function ensureTypingBus() {
   try {
@@ -1047,8 +1441,185 @@ function ensureTypingBus() {
           showConversationTypingIndicator();
         }
       })
-      .subscribe();
+      .subscribe((status) => {
+        try {
+          if (status === 'SUBSCRIBED') {
+            // Send an immediate heartbeat upon subscription ACK
+            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } });
+          }
+        } catch {}
+      });
   } catch {}
+}
+
+function ensurePresenceBus() {
+  try {
+    if (!currentUser) return;
+    if (presenceBus) return;
+    presenceBus = sb.channel('presence-bus')
+      // Heartbeat packets for sub-second presence updates
+      .on('broadcast', { event: 'presence-hb' }, (p) => {
+        const uidRaw = p?.payload?.id;
+        const uid = uidRaw != null ? String(uidRaw) : '';
+        if (!uid) return;
+        dbgPresence('hb recv', { uid });
+        presenceHeartbeats.set(uid, Date.now());
+        presenceMisses.set(uid, 0);
+        if (!presenceFirstSeenAt.has(uid)) presenceFirstSeenAt.set(uid, Date.now());
+        // Also update dataset for recency fallback
+        try {
+          const li = userList?.querySelector(`li[data-user-id="${uid}"]`);
+          if (li) {
+            li.dataset.isOnline = 'true';
+            li.dataset.lastActive = new Date().toISOString();
+          }
+        } catch {}
+        // Mark online immediately in UI (fast path)
+        updatePresenceUIForUser({ id: uid, is_online: true, last_active: new Date().toISOString() });
+      })
+      .on('broadcast', { event: 'presence' }, (p) => {
+        const payload = p?.payload || {};
+        const uidRaw = payload?.id;
+        const uid = uidRaw != null ? String(uidRaw) : '';
+        if (!uid) return;
+        dbgPresence('presence recv', { uid, is_online: !!payload.is_online });
+        // If we haven't seen any heartbeat for this uid yet, seed one to bridge initial gap
+        if (!presenceHeartbeats.has(uid)) {
+          presenceHeartbeats.set(uid, Date.now());
+          presenceMisses.set(uid, 0);
+        }
+        if (!presenceFirstSeenAt.has(uid)) presenceFirstSeenAt.set(uid, Date.now());
+        // Update UI immediately using broadcast data
+        updatePresenceUIForUser({ id: uid, is_online: !!payload.is_online, last_active: payload.last_active || null });
+      })
+      .on('broadcast', { event: 'presence-bye' }, (p) => {
+        const uidRaw = p?.payload?.id;
+        const uid = uidRaw != null ? String(uidRaw) : '';
+        if (!uid) return;
+        dbgPresence('bye recv', { uid });
+        // Force immediate offline for this user
+        presenceHeartbeats.set(uid, 0);
+        presenceMisses.set(uid, 99);
+        updatePresenceUIForUser({ id: uid, is_online: false, last_active: new Date().toISOString() });
+      })
+      .subscribe((status) => {
+        try {
+          if (status === 'SUBSCRIBED') {
+            // Ensure an immediate heartbeat as soon as the bus is ready
+            dbgPresence('bus SUBSCRIBED → send immediate hb');
+            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } });
+          }
+        } catch {}
+      });
+  } catch {}
+}
+
+function startPresenceBusHeartbeat() {
+  try {
+    if (!currentUser) return;
+    ensurePresenceBus();
+    if (presenceBusHeartbeatTimer) return;
+    // Send an immediate heartbeat, then every 1s for near-instant updates
+    try { dbgPresence('send hb immediate'); presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } }); } catch {}
+    presenceBusHeartbeatTimer = setInterval(() => {
+      try {
+        dbgPresence('send hb tick');
+        presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } });
+      } catch {}
+    }, 1000);
+  } catch {}
+}
+
+function stopPresenceBusHeartbeat() {
+  try { if (presenceBusHeartbeatTimer) { clearInterval(presenceBusHeartbeatTimer); presenceBusHeartbeatTimer = null; } } catch {}
+}
+
+function startPresenceActivityPings() {
+  try {
+    if (presenceActivityHandlerBound) return;
+    const sendActivityHb = () => {
+      const now = Date.now();
+      if (now - lastActivityHbSentAt < 2000) return; // throttle to every 2s
+      lastActivityHbSentAt = now;
+      try { presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } }); } catch {}
+    };
+    const events = ['focus', 'mousemove', 'keydown', 'touchstart', 'scroll', 'visibilitychange'];
+    events.forEach(ev => window.addEventListener(ev, sendActivityHb, { passive: true }));
+    presenceActivityHandlerBound = true;
+    presenceActivityHandlerFn = sendActivityHb;
+  } catch {}
+}
+
+function stopPresenceActivityPings() {
+  try {
+    if (!presenceActivityHandlerBound) return;
+    const events = ['focus', 'mousemove', 'keydown', 'touchstart', 'scroll', 'visibilitychange'];
+    if (presenceActivityHandlerFn) {
+      events.forEach(ev => window.removeEventListener(ev, presenceActivityHandlerFn));
+    }
+    presenceActivityHandlerBound = false;
+  } catch {}
+}
+
+function startPresenceBusMonitor() {
+  try {
+    if (presenceBusMonitorTimer) return;
+    // Every 1s, mark users offline if no heartbeat in last ~2–3s
+    presenceBusMonitorTimer = setInterval(() => {
+      try {
+        if (!userList) return;
+        const now = Date.now();
+        userList.querySelectorAll('li[data-user-id]').forEach(li => {
+          const uid = li.dataset.userId;
+          if (!uid) return;
+          const last = presenceHeartbeats.get(uid) || 0;
+          const hbOnline = (now - last) <= 2500; // strict but tolerant window (~1–2s target)
+          // Only use recency if we have NEVER seen a heartbeat for this uid
+          const seenHb = presenceHeartbeats.has(uid);
+          const recencyOnline = !seenHb && isOnlineFrom({ id: uid, is_online: li.dataset.isOnline === 'true', last_active: li.dataset.lastActive || '' });
+          // Base decision from heartbeat or (if never seen HB) recency
+          const baseOnline = hbOnline || recencyOnline;
+          // One-miss hysteresis: don't flip offline on the first miss to avoid jitter flicker
+          let online = baseOnline;
+          if (!baseOnline) {
+            // Warmup: do not allow offline within the first 3s of seeing this user
+            const first = presenceFirstSeenAt.get(uid) || 0;
+            if (first && (now - first) < 3000) {
+              online = true;
+              presenceMisses.set(uid, 0);
+            } else {
+              const misses = (presenceMisses.get(uid) || 0) + 1;
+              presenceMisses.set(uid, misses);
+              if (misses < 2) online = true; // keep online for one interval
+            }
+          } else {
+            presenceMisses.set(uid, 0);
+          }
+          dbgPresence('mon', { uid, delta: now - last, hbOnline, seenHb, recencyOnline, baseOnline, online, misses: presenceMisses.get(uid) || 0 });
+          const dot = li.querySelector('.status-dot');
+          if (dot) {
+            dot.classList.toggle('online', online);
+            dot.classList.toggle('offline', !online);
+            dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
+          }
+          const statusEl = li.querySelector('.status');
+          if (statusEl) {
+            const cur = statusEl.textContent || '';
+            const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
+            if (!isSnippet) {
+              // If offline, keep last_active fallback text if we have it
+              const lastRaw = li.dataset.lastActive || '';
+              statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
+            }
+          }
+        });
+      } catch {}
+    }, 1000);
+  } catch {}
+}
+
+function stopPresenceBusMonitor() {
+  try { if (presenceBusMonitorTimer) { clearInterval(presenceBusMonitorTimer); presenceBusMonitorTimer = null; } } catch {}
 }
 
 function teardownTypingBus() {
@@ -1118,9 +1689,12 @@ async function loadUsers() {
         setAvatar(av, u.username || 'User', u.avatar_url);
         // Append presence dot
         const dot = document.createElement('div');
-        dot.className = 'status-dot ' + (u.is_online ? 'online' : 'offline');
-        dot.setAttribute('aria-label', u.is_online ? 'Online' : 'Offline');
+        const online = isOnlineFrom(u);
+        dot.className = 'status-dot ' + (online ? 'online' : 'offline');
+        dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
         av.appendChild(dot);
+        // Seed heartbeat for users initially evaluated as online so the monitor doesn't flip them
+        if (online) { try { presenceHeartbeats.set(String(u.id), Date.now()); } catch {} }
         // Unread badge
         const badge = document.createElement('span');
         badge.className = 'unread-badge';
@@ -1149,8 +1723,11 @@ async function loadUsers() {
           statusEl.textContent = prefix + snippet;
         } else {
           // Fallback to presence/last active
-          statusEl.textContent = u.is_online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
+          statusEl.textContent = online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
         }
+        // Persist raw values for recency ticker
+        li.dataset.lastActive = u.last_active || '';
+        li.dataset.isOnline = String(!!u.is_online);
         // Set initial unread
         const uc = unreadCountByPeer.get(u.id) || 0;
         applyUnreadBadge(li, uc);
@@ -1252,6 +1829,16 @@ async function enterChat() {
   await loadUsers();
   // Start realtime updates for inbox previews (last message per user)
   subscribeUserListMessages();
+  // Presence realtime + lifecycle
+  subscribePresence();
+  ensurePresenceBus();
+  bindPresenceWindowHandlers();
+  startPresenceHeartbeat();
+  startPresenceRecencyTicker();
+  startPresencePolling();
+  startPresenceBusHeartbeat();
+  startPresenceBusMonitor();
+  startPresenceActivityPings();
   // Load stories bar once in chat
   try { await loadStories(); subscribeStories(); } catch (e) { console.warn('stories init failed', e); }
 }
@@ -1271,6 +1858,7 @@ async function openConversation(peerId) {
   messagesEl.innerHTML = '';
   // Mobile: switch to conversation view
   chatScreen.classList.add('show-convo');
+  try { document.body.classList.add('chat-inbox'); } catch {}
   // Fetch recent messages between me and peer
   const { data, error } = await sb
     .from('messages')
@@ -1883,6 +2471,7 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
     if (event === 'SIGNED_OUT') {
       session = null; currentUser = null; meProfile = null;
       teardownTypingBus();
+      teardownPresence();
       setLoggedInUI(false);
       show(calculatorScreen);
     }
@@ -1974,6 +2563,7 @@ try {
 if (btnBack) {
   btnBack.addEventListener('click', () => {
     chatScreen.classList.remove('show-convo');
+    try { document.body.classList.remove('chat-inbox'); } catch {}
     activePeerId = null;
   });
 }

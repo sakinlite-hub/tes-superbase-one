@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CalcChat</title>
-  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="stylesheet" href="styles.css?v=4" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -25,15 +25,20 @@
       <div class="calc">
         <div class="calc-display" id="calc-display">0</div>
         <div class="calc-keys">
+          <button data-key="C" class="muted">C</button>
+          <button data-key="⌫" class="muted">⌫</button>
+          <button data-key="/" class="muted">÷</button>
+          <button data-key="*" class="muted">×</button>
+
           <button data-key="7">7</button>
           <button data-key="8">8</button>
           <button data-key="9">9</button>
-          <button data-key="C" class="muted">C</button>
+          <button data-key="-" class="muted">−</button>
 
           <button data-key="4">4</button>
           <button data-key="5">5</button>
           <button data-key="6">6</button>
-          <button data-key="⌫" class="muted">⌫</button>
+          <button data-key="+" class="primary">+</button>
 
           <button data-key="1">1</button>
           <button data-key="2">2</button>
@@ -41,8 +46,7 @@
           <button data-key="=" class="primary">=</button>
 
           <button data-key="0" class="wide">0</button>
-          <button data-key="," class="muted" disabled>,</button>
-          <button data-key="." class="muted" disabled>.</button>
+          <button data-key="." class="">.</button>
         </div>
         <div id="lock-hint" class="hint">Sign in to set a passcode. After login, enter your passcode and press = to unlock.</div>
       </div>
@@ -270,17 +274,33 @@
         </div>
         <div class="field">
           <label for="signup-password">Password</label>
-          <input type="password" id="signup-password" class="with-icon" minlength="6" required />
+          <div class="input-wrap">
+            <input type="password" id="signup-password" class="with-icon" minlength="6" required />
+            <button type="button" class="icon-btn toggle-visibility" aria-label="Show password" aria-pressed="false" data-target="signup-password">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+          </div>
           <div class="help">At least 6 characters</div>
+          <div id="pw-strength" class="strength" aria-live="polite"></div>
         </div>
         <div class="field">
-          <label for="signup-passcode1">Passcode (optional)</label>
-          <input type="password" id="signup-passcode1" inputmode="numeric" pattern="[0-9]*" minlength="4" placeholder="4+ digits" />
+          <label for="signup-passcode1">Passcode</label>
+          <div class="input-wrap">
+            <input type="password" id="signup-passcode1" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" autocomplete="off" placeholder="4+ digits" required />
+            <button type="button" class="icon-btn toggle-visibility" aria-label="Show passcode" aria-pressed="false" data-target="signup-passcode1">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+          </div>
         </div>
         <div class="field">
           <label for="signup-passcode2">Confirm Passcode</label>
-          <input type="password" id="signup-passcode2" inputmode="numeric" pattern="[0-9]*" minlength="4" placeholder="Re-enter passcode" />
-          <div class="help">If provided, must be at least 4 digits and both fields must match.</div>
+          <div class="input-wrap">
+            <input type="password" id="signup-passcode2" inputmode="numeric" pattern="[0-9]*" minlength="4" maxlength="8" autocomplete="off" placeholder="Re-enter passcode" required />
+            <button type="button" class="icon-btn toggle-visibility" aria-label="Show passcode" aria-pressed="false" data-target="signup-passcode2">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+          </div>
+          <div class="help">At least 4 digits and both fields must match.</div>
         </div>
         <div class="actions">
           <button type="button" class="btn ghost" data-close-auth value="close">Close</button>
@@ -295,7 +315,12 @@
         </div>
         <div class="field">
           <label for="signin-password">Password</label>
-          <input type="password" id="signin-password" class="with-icon" required />
+          <div class="input-wrap">
+            <input type="password" id="signin-password" class="with-icon" required />
+            <button type="button" class="icon-btn toggle-visibility" aria-label="Show password" aria-pressed="false" data-target="signin-password">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+          </div>
         </div>
         <div class="actions">
           <button type="button" class="btn ghost" data-close-auth value="close">Close</button>
@@ -347,12 +372,12 @@
       <h3>Set your calculator passcode</h3>
       <div class="field">
         <label for="passcode1">Passcode (digits only)</label>
-        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode1" minlength="4" required />
+        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode1" minlength="4" maxlength="8" autocomplete="off" required />
         <div class="help">Minimum 4 digits. Use the calculator then press = to unlock.</div>
       </div>
       <div class="field">
         <label for="passcode2">Confirm Passcode</label>
-        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode2" minlength="4" required />
+        <input type="password" inputmode="numeric" pattern="[0-9]*" id="passcode2" minlength="4" maxlength="8" autocomplete="off" required />
       </div>
       <p id="passcode-error" class="error" hidden></p>
       <div class="actions">
