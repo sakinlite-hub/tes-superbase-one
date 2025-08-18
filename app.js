@@ -4,6 +4,26 @@ const sb = window.sb;
 // Boot log to confirm script loaded
 try { console.debug('[CalcChat] app.js loaded'); } catch {}
 
+async function signOutWithTimeout(timeoutMs = 5000) {
+  function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
+  try {
+    await Promise.race([
+      sb.auth.signOut(),
+      (async()=>{ await delay(timeoutMs); throw new Error('signOut timeout'); })()
+    ]);
+  } catch (e) {
+    // Fallback to local reset only
+    try { console.warn('[Auth] signOut timed out, doing local reset'); } catch {}
+  }
+}
+
+async function forceLocalAuthReset() {
+  try {
+    // Only clear local auth storage; do NOT recreate client here since `sb` is a const reference
+    clearSupabaseAuthStorageKeys();
+  } catch {}
+}
+
 // Tenor GIF/Stickers Picker Logic
 function openGifPicker(kind = 'gifs') {
   gifKind = kind === 'stickers' ? 'stickers' : 'gifs';
@@ -1102,20 +1122,33 @@ btnSignin.addEventListener('click', async () => {
     await healAuthIfCorrupted();
     try {
       const { data: { session: cur } } = await sb.auth.getSession();
-      if (cur) { await sb.auth.signOut(); }
+      if (cur) {
+        await signOutWithTimeout();
+        clearSessionBackup();
+        await forceLocalAuthReset();
+      }
     } catch {}
-    const { data, error } = await signInWithTimeout(email, password, 15000);
-    if (error) { throw error; }
-    // Fallback: if session is already available, ensure UI updates even if onAuthStateChange is delayed
-    if (data?.session) {
-      await refreshSession();
-      ensureTypingBus();
-      await ensureProfile();
-      setLoggedInUI(true);
-      if (authModal?.close) authModal.close();
-      toast('success','Signed in', 'Welcome back!');
+    let { data, error } = await signInWithTimeout(email, password, 15000);
+    if (error) {
+      // One-shot local reset + retry to heal stuck mobile states
+      await forceLocalAuthReset();
+      ({ data, error } = await signInWithTimeout(email, password, 15000));
+      if (error) throw error;
     }
-    // onAuthStateChange listener will proceed
+    // Fallback: if event doesn't fire promptly, proceed when session exists
+    try {
+      await refreshSession();
+      if (currentUser) {
+        await ensureProfile();
+        setLoggedInUI(true);
+        if (authModal?.close) authModal.close();
+        show(calculatorScreen);
+        try {
+          const cur = (await sb.auth.getSession()).data?.session;
+          if (cur) backupSession(cur);
+        } catch {}
+      }
+    } catch {}
   } catch (e) {
     authError.textContent = e?.message || 'Sign in failed'; authError.hidden = false; toast('error','Sign in failed', authError.textContent);
   } finally {
@@ -1125,7 +1158,9 @@ btnSignin.addEventListener('click', async () => {
 
 btnLogout.addEventListener('click', async () => {
   await setPresence(false);
-  await sb.auth.signOut();
+  await signOutWithTimeout();
+  clearSessionBackup();
+  await forceLocalAuthReset();
   session = null; currentUser = null; meProfile = null; activePeerId = null;
   setLoggedInUI(false);
   teardownPresence();
@@ -1148,16 +1183,10 @@ async function refreshSession() {
   } catch {}
 }
 
-// Attempt to detect and clear corrupted Supabase auth cache entries that can hang sign-in on some mobile browsers
+// Attempt to detect and clear corrupted Supabase auth cache entries (be conservative)
 async function healAuthIfCorrupted() {
   try {
-    // Quick probe: does getSession throw? If yes, wipe SB auth keys
-    try { await sb.auth.getSession(); } catch (e) {
-      try { console.warn('[Auth] getSession threw, clearing SB auth storage:', e?.message || e); } catch {}
-      clearSupabaseAuthStorageKeys();
-      return;
-    }
-    // Also validate that stored token JSON (if present) is parseable
+    // Validate that stored token JSON (if present) is parseable
     validateSupabaseStorageJSON();
   } catch {}
 }
@@ -1166,18 +1195,11 @@ function validateSupabaseStorageJSON() {
   try {
     const keys = supabaseAuthStorageKeys();
     for (const k of keys) {
-      let v = null; let where = 'localStorage';
-      try { v = localStorage.getItem(k); } catch {}
-      if (v == null) {
-        where = 'sessionStorage';
-        try { v = sessionStorage.getItem(k); } catch {}
-      }
+      const v = localStorage.getItem(k);
       if (v == null) continue;
       try { JSON.parse(v); } catch (e) {
-        try { console.warn('[Auth] Invalid JSON in', k, 'in', where, '-> clearing'); } catch {}
-        try { localStorage.removeItem(k); } catch {}
-        try { sessionStorage.removeItem(k); } catch {}
-        try { deleteCookie(k); } catch {}
+        try { console.warn('[Auth] Invalid JSON in', k, '-> clearing'); } catch {}
+        localStorage.removeItem(k);
       }
     }
   } catch {}
@@ -1191,25 +1213,45 @@ function supabaseAuthStorageKeys() {
     const ref = m ? m[1] : '';
     if (ref) {
       keys.push(`sb-${ref}-auth-token`);
-      keys.push(`sb-${ref}-auth-state`);
-      keys.push(`sb-${ref}-auth-debug`);
+      keys.push(`sb-${ref}-state`);
     }
     // Legacy keys that may exist from older SDKs
     keys.push('supabase.auth.token');
-    // Scan existing storage for any sb-* auth keys to be safe
-    const collect = (store) => {
-      try {
-        for (let i = 0; i < store.length; i++) {
-          const k = store.key(i);
-          if (!k) continue;
-          if (k.startsWith('sb-') && k.includes('auth')) keys.push(k);
-        }
-      } catch {}
-    };
-    try { collect(localStorage); } catch {}
-    try { collect(sessionStorage); } catch {}
   } catch {}
   return keys;
+}
+
+const AUTH_BACKUP_KEY = 'cc-auth-backup';
+
+function backupSession(s) {
+  try {
+    if (!s?.access_token || !s?.refresh_token) return;
+    const payload = { access_token: s.access_token, refresh_token: s.refresh_token };
+    try { localStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
+    try { sessionStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
+  } catch {}
+}
+
+function clearSessionBackup() {
+  try { localStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
+  try { sessionStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
+}
+
+async function tryRestoreSessionFromBackup() {
+  try {
+    const cur = await sb.auth.getSession().then(r=>r?.data?.session || null).catch(()=>null);
+    if (cur) return false;
+    let raw = null;
+    try { raw = localStorage.getItem(AUTH_BACKUP_KEY); } catch {}
+    if (!raw) { try { raw = sessionStorage.getItem(AUTH_BACKUP_KEY); } catch {} }
+    if (!raw) return false;
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch { return false; }
+    if (!parsed?.access_token || !parsed?.refresh_token) return false;
+    const { data, error } = await sb.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token });
+    if (error) { try { console.warn('[Auth] setSession from backup failed', error.message || error); } catch {} ; return false; }
+    return !!data?.session;
+  } catch { return false; }
 }
 
 function clearSupabaseAuthStorageKeys() {
@@ -1218,13 +1260,9 @@ function clearSupabaseAuthStorageKeys() {
     keys.forEach(k => {
       try { localStorage.removeItem(k); } catch {}
       try { sessionStorage.removeItem(k); } catch {}
-      try { deleteCookie(k); } catch {}
+      try { document.cookie = `${encodeURIComponent(k)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
     });
   } catch {}
-}
-
-function deleteCookie(name) {
-  try { document.cookie = `${encodeURIComponent(name)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
 }
 
 async function signInWithTimeout(email, password, timeoutMs) {
@@ -2643,20 +2681,11 @@ if (btnAttach && imageInput) {
 if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
   sb.auth.onAuthStateChange(async (event, s) => {
     try { console.debug('[Auth] onAuthStateChange', event, 'hasSession:', !!s, 'userId:', s?.user?.id || null); } catch {}
-    // Treat INITIAL_SESSION with a valid session the same as SIGNED_IN
-    if (event === 'INITIAL_SESSION' && s) {
-      try {
-        session = s; currentUser = s.user;
-        await refreshSession();
-        ensureTypingBus();
-        await ensureProfile();
-        setLoggedInUI(true);
-        if (authModal?.close) authModal.close();
-        show(calculatorScreen);
-      } catch {}
-      return;
+    if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+      try { backupSession(s); } catch {}
     }
     if (event === 'SIGNED_IN') {
+      try { backupSession(s); } catch {}
       await refreshSession();
       ensureTypingBus();
       await ensureProfile();
@@ -2676,23 +2705,13 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
       await ensurePasscode();
       show(calculatorScreen);
     }
-    // Ignore spurious SIGNED_OUTs that can occur during reload on some mobile browsers
     if (event === 'SIGNED_OUT') {
-      try {
-        const { data: { session: still } } = await sb.auth.getSession();
-        if (still) {
-          try { console.warn('[Auth] Ignoring spurious SIGNED_OUT; session still present'); } catch {}
-          return;
-        }
-      } catch {}
+      try { clearSessionBackup(); } catch {}
       session = null; currentUser = null; meProfile = null;
       teardownTypingBus();
       teardownPresence();
       setLoggedInUI(false);
       show(calculatorScreen);
-    }
-    if (event === 'TOKEN_REFRESHED') {
-      try { await refreshSession(); } catch {}
     }
   });
 }
@@ -2701,20 +2720,9 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
   // Enforce dark mode by default
   applyTheme('dark');
   try { await healAuthIfCorrupted(); } catch {}
+  // If storage was purged or corrupted, try to restore from backup tokens
+  try { await tryRestoreSessionFromBackup(); } catch {}
   try { await refreshSession(); } catch { /* ignore */ }
-  // Short watchdog to stabilize UI after reload on mobile if events are delayed
-  try {
-    setTimeout(async () => {
-      try {
-        await refreshSession();
-        if (currentUser) {
-          ensureTypingBus();
-          await ensureProfile();
-          setLoggedInUI(true);
-        }
-      } catch {}
-    }, 500);
-  } catch {}
 })();
 
 // Ensure listeners are bound even if DOM was not fully ready

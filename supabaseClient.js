@@ -9,17 +9,18 @@ if (typeof window.SUPABASE_URL === 'undefined' || typeof window.SUPABASE_ANON_KE
 if (!window.supabase || !window.supabase.createClient) {
   console.error('Supabase JS SDK not loaded. Ensure <script src="https://unpkg.com/@supabase/supabase-js@2"></script> is included before this file.');
 } else {
-  // Resilient storage: localStorage primary, sessionStorage fallback (avoid cookie truncation issues)
+  // Resilient storage: prefer localStorage, fall back to sessionStorage (avoid cookies due to 4KB limits on tokens)
   const resilientStorage = {
     getItem: (key) => {
       try { const v = window.localStorage.getItem(key); if (v != null) return v; } catch {}
-      try { return window.sessionStorage.getItem(key); } catch {}
+      try { const v2 = window.sessionStorage.getItem(key); if (v2 != null) return v2; } catch {}
       return null;
     },
     setItem: (key, value) => {
-      let stored = false;
-      try { window.localStorage.setItem(key, value); stored = true; } catch {}
-      if (!stored) { try { window.sessionStorage.setItem(key, value); } catch {} }
+      let ok = false;
+      try { window.localStorage.setItem(key, value); ok = true; } catch {}
+      if (!ok) { try { window.sessionStorage.setItem(key, value); ok = true; } catch {} }
+      return ok;
     },
     removeItem: (key) => {
       try { window.localStorage.removeItem(key); } catch {}
@@ -27,16 +28,20 @@ if (!window.supabase || !window.supabase.createClient) {
     }
   };
 
-  // Do NOT overwrite window.supabase (namespace). Create a client instance as window.sb
-  window.sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-      storage: resilientStorage,
-    },
-    realtime: {
-      params: { eventsPerSecond: 20 }
-    }
-  });
+  // Factory to create a new Supabase client instance
+  window.makeSupabaseClient = function makeSupabaseClient() {
+    return window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        storage: resilientStorage,
+      },
+      realtime: {
+        params: { eventsPerSecond: 20 }
+      }
+    });
+  };
+  // Initialize default instance
+  window.sb = window.makeSupabaseClient();
 }
