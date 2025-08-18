@@ -1309,6 +1309,79 @@ let convoTypingEl = null;
 let convoTypingTimer = null;
 let typingLastSentAt = 0;
 let presenceBus = null; // realtime presence broadcast channel
+
+// Typing helpers (conversation + list)
+function ensureConvoTypingEl() {
+  try {
+    if (!convoTypingEl) {
+      // Reuse existing node if present
+      convoTypingEl = document.getElementById('convo-typing') || document.createElement('div');
+      if (!convoTypingEl.id) convoTypingEl.id = 'convo-typing';
+      convoTypingEl.className = 'typing-indicator';
+      convoTypingEl.textContent = 'Typing…';
+      convoTypingEl.style.display = 'none';
+      // Place just below messages
+      const container = messagesEl?.parentElement || document.querySelector('.conversation');
+      if (container && !document.getElementById('convo-typing')) {
+        container.appendChild(convoTypingEl);
+      }
+    }
+  } catch {}
+}
+
+function showConversationTypingIndicator() {
+  try {
+    ensureConvoTypingEl();
+    if (!convoTypingEl) return;
+    convoTypingEl.style.display = '';
+    // Auto-hide after 3s of inactivity
+    if (convoTypingTimer) clearTimeout(convoTypingTimer);
+    convoTypingTimer = setTimeout(() => { hideConversationTypingIndicator(); }, 3000);
+  } catch {}
+}
+
+function hideConversationTypingIndicator() {
+  try {
+    if (convoTypingTimer) { clearTimeout(convoTypingTimer); convoTypingTimer = null; }
+    if (convoTypingEl) convoTypingEl.style.display = 'none';
+  } catch {}
+}
+
+function showTypingInList(peerId) {
+  try {
+    const li = userList?.querySelector(`li[data-user-id="${peerId}"]`);
+    if (!li) return;
+    const statusEl = li.querySelector('.status');
+    if (!statusEl) return;
+    statusEl.textContent = 'Typing…';
+    // Reset previous timer
+    const prev = typingTimers.get(peerId);
+    if (prev) clearTimeout(prev);
+    // After 2.5s, revert to presence/recency text
+    const t = setTimeout(() => {
+      try {
+        const lastRaw = li.dataset.lastActive || '';
+        // If presence monitor will update imminently, keep as-is; otherwise revert gracefully
+        const uid = String(peerId);
+        const lastHb = presenceHeartbeats.get(uid) || 0;
+        const online = (Date.now() - lastHb) <= 2500;
+        statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
+      } catch {}
+    }, 2500);
+    typingTimers.set(peerId, t);
+  } catch {}
+}
+
+async function emitTyping() {
+  try {
+    if (!currentUser || !activePeerId) return;
+    const now = Date.now();
+    if (now - typingLastSentAt < 1200) return; // throttle ~1.2s
+    typingLastSentAt = now;
+    ensureTypingBus();
+    typingBus?.send({ type: 'broadcast', event: 'typing', payload: { from: currentUser.id, to: activePeerId } });
+  } catch {}
+}
 let presenceBusHeartbeatTimer = null;
 let presenceBusMonitorTimer = null;
 const presenceHeartbeats = new Map(); // userId -> last seen ms
