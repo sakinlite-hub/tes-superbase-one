@@ -1229,6 +1229,7 @@ function backupSession(s) {
     const payload = { access_token: s.access_token, refresh_token: s.refresh_token };
     try { localStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
     try { sessionStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
+    try { console.debug('[Auth][backup] stored tokens to backup'); } catch {}
   } catch {}
 }
 
@@ -1241,6 +1242,7 @@ async function tryRestoreSessionFromBackup() {
   try {
     const cur = await sb.auth.getSession().then(r=>r?.data?.session || null).catch(()=>null);
     if (cur) return false;
+    try { console.debug('[Auth][restore] attempting from backup'); } catch {}
     let raw = null;
     try { raw = localStorage.getItem(AUTH_BACKUP_KEY); } catch {}
     if (!raw) { try { raw = sessionStorage.getItem(AUTH_BACKUP_KEY); } catch {} }
@@ -1250,7 +1252,9 @@ async function tryRestoreSessionFromBackup() {
     if (!parsed?.access_token || !parsed?.refresh_token) return false;
     const { data, error } = await sb.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token });
     if (error) { try { console.warn('[Auth] setSession from backup failed', error.message || error); } catch {} ; return false; }
-    return !!data?.session;
+    const ok = !!data?.session;
+    try { console.debug('[Auth][restore] success:', ok); } catch {}
+    return ok;
   } catch { return false; }
 }
 
@@ -2733,6 +2737,22 @@ document.addEventListener('DOMContentLoaded', () => {
   const dlg = document.getElementById('auth-modal');
   if (btn && dlg && typeof dlg.showModal === 'function') {
     if (!btn.__cc_bound) { btn.addEventListener('click', () => dlg.showModal()); btn.__cc_bound = true; }
+  }
+  // Reset auth helper (for stuck mobile states)
+  const resetBtn = document.getElementById('btn-auth-reset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', async () => {
+      try { console.debug('[Auth] manual reset triggered'); } catch {}
+      try { await signOutWithTimeout(); } catch {}
+      try { clearSessionBackup(); } catch {}
+      try {
+        const keys = (supabaseAuthStorageKeys && supabaseAuthStorageKeys()) || [];
+        try { console.debug('[Auth] clearing keys:', keys); } catch {}
+      } catch {}
+      try { clearSupabaseAuthStorageKeys(); } catch {}
+      try { await forceLocalAuthReset(); } catch {}
+      toast('success','Auth reset','Local auth cache cleared. Try signing in again.');
+    });
   }
   // Chat textarea auto-grow
   const ta = document.getElementById('message-input');

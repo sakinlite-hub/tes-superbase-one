@@ -17,10 +17,10 @@ if (!window.supabase || !window.supabase.createClient) {
       return null;
     },
     setItem: (key, value) => {
-      let ok = false;
-      try { window.localStorage.setItem(key, value); ok = true; } catch {}
-      if (!ok) { try { window.sessionStorage.setItem(key, value); ok = true; } catch {} }
-      return ok;
+      let wrote = false;
+      try { window.localStorage.setItem(key, value); wrote = true; } catch {}
+      try { window.sessionStorage.setItem(key, value); wrote = true; } catch {}
+      return wrote;
     },
     removeItem: (key) => {
       try { window.localStorage.removeItem(key); } catch {}
