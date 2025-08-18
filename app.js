@@ -1230,12 +1230,21 @@ function backupSession(s) {
     try { localStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
     try { sessionStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
     try { console.debug('[Auth][backup] stored tokens to backup'); } catch {}
+    // Cookie fallback for environments where both storages are unavailable
+    try {
+      const raw = JSON.stringify(payload);
+      if (raw && raw.length <= 3500) {
+        const secure = location.protocol === 'https:' ? '; Secure' : '';
+        document.cookie = `${encodeURIComponent(AUTH_BACKUP_KEY)}=${encodeURIComponent(raw)}; path=/; SameSite=Lax${secure}`;
+      }
+    } catch {}
   } catch {}
 }
 
 function clearSessionBackup() {
   try { localStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
   try { sessionStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
+  try { document.cookie = `${encodeURIComponent(AUTH_BACKUP_KEY)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
 }
 
 async function tryRestoreSessionFromBackup() {
@@ -1246,6 +1255,14 @@ async function tryRestoreSessionFromBackup() {
     let raw = null;
     try { raw = localStorage.getItem(AUTH_BACKUP_KEY); } catch {}
     if (!raw) { try { raw = sessionStorage.getItem(AUTH_BACKUP_KEY); } catch {} }
+    if (!raw) {
+      try {
+        const parts = (document.cookie || '').split('; ').filter(Boolean);
+        const pref = `${encodeURIComponent(AUTH_BACKUP_KEY)}=`;
+        const row = parts.find(p => p.startsWith(pref));
+        if (row) raw = decodeURIComponent(row.substring(pref.length));
+      } catch {}
+    }
     if (!raw) return false;
     let parsed = null;
     try { parsed = JSON.parse(raw); } catch { return false; }
