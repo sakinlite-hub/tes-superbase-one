@@ -15,7 +15,6 @@ if (!window.supabase || !window.supabase.createClient) {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
-      storageKey: 'calcchat-auth'
     },
     realtime: {
       params: { eventsPerSecond: 20 }

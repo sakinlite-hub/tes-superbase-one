@@ -1079,17 +1079,7 @@ btnSignup.addEventListener('click', async () => {
     // If session missing, attempt immediate sign in
     // Stash required passcode to apply right after sign-in
     try { sessionStorage.setItem('pending_passcode', p1); } catch {}
-    let siErr = null;
-    try {
-      // Pre-clear any stale session to avoid refresh-token conflicts, then sign in with a timeout
-      try { await sb.auth.signOut(); } catch {}
-      await Promise.race([
-        sb.auth.signInWithPassword({ email, password }).then(({ data, error }) => { if (error) throw error; return data; }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Sign in timed out. Check your connection and try again.')), 10000))
-      ]);
-    } catch (e) {
-      siErr = e;
-    }
+    const { error: siErr } = await sb.auth.signInWithPassword({ email, password });
     if (siErr) {
       toast('success','Account created','Now sign in with your credentials.');
     } else {
@@ -1108,22 +1098,15 @@ btnSignin.addEventListener('click', async () => {
   const password = signinPassword.value;
   btnSignin.disabled = true; btnSignin.textContent = 'Signing in...';
   try {
-    // Clear any stale session first to avoid refresh token reuse issues across devices
-    try { await sb.auth.signOut(); } catch {}
-    let siErr = null;
+    // Heal any corrupted local session first, then ensure a clean sign-in
+    await healAuthIfCorrupted();
     try {
-      await Promise.race([
-        sb.auth.signInWithPassword({ email, password }).then(({ data, error }) => { if (error) throw error; return data; }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('Sign in timed out. Check your connection and try again.')), 10000))
-      ]);
-    } catch (e) {
-      siErr = e;
-    }
-    if (siErr) {
-      authError.textContent = siErr?.message || 'Sign in failed'; authError.hidden = false; toast('error','Sign in failed', authError.textContent);
-    } else {
-      // onAuthStateChange listener will proceed
-    }
+      const { data: { session: cur } } = await sb.auth.getSession();
+      if (cur) { await sb.auth.signOut(); }
+    } catch {}
+    const { data, error } = await signInWithTimeout(email, password, 15000);
+    if (error) { throw error; }
+    // onAuthStateChange listener will proceed
   } catch (e) {
     authError.textContent = e?.message || 'Sign in failed'; authError.hidden = false; toast('error','Sign in failed', authError.textContent);
   } finally {
@@ -1154,6 +1137,85 @@ async function refreshSession() {
       await ensureProfile();
     }
   } catch {}
+}
+
+// Attempt to detect and clear corrupted Supabase auth cache entries that can hang sign-in on some mobile browsers
+async function healAuthIfCorrupted() {
+  try {
+    // Quick probe: does getSession throw? If yes, wipe SB auth keys
+    try { await sb.auth.getSession(); } catch (e) {
+      try { console.warn('[Auth] getSession threw, clearing SB auth storage:', e?.message || e); } catch {}
+      clearSupabaseAuthStorageKeys();
+      return;
+    }
+    // Also validate that stored token JSON (if present) is parseable
+    validateSupabaseStorageJSON();
+  } catch {}
+}
+
+function validateSupabaseStorageJSON() {
+  try {
+    const keys = supabaseAuthStorageKeys();
+    for (const k of keys) {
+      const v = localStorage.getItem(k);
+      if (v == null) continue;
+      try { JSON.parse(v); } catch (e) {
+        try { console.warn('[Auth] Invalid JSON in', k, '-> clearing'); } catch {}
+        localStorage.removeItem(k);
+      }
+    }
+  } catch {}
+}
+
+function supabaseAuthStorageKeys() {
+  const keys = [];
+  try {
+    const url = String(window.SUPABASE_URL || '');
+    const m = url.match(/^https?:\/\/([^.]+)/i);
+    const ref = m ? m[1] : '';
+    if (ref) {
+      keys.push(`sb-${ref}-auth-token`);
+      keys.push(`sb-${ref}-state`);
+    }
+    // Legacy keys that may exist from older SDKs
+    keys.push('supabase.auth.token');
+  } catch {}
+  return keys;
+}
+
+function clearSupabaseAuthStorageKeys() {
+  try {
+    const keys = supabaseAuthStorageKeys();
+    keys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+  } catch {}
+}
+
+async function signInWithTimeout(email, password, timeoutMs) {
+  const start = Date.now();
+  function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
+  try {
+    const race = await Promise.race([
+      (async () => {
+        try { return await sb.auth.signInWithPassword({ email, password }); } catch (e) { return { data: null, error: e }; }
+      })(),
+      (async () => { await delay(timeoutMs); return { __timeout: true }; })()
+    ]);
+    if (race && race.__timeout) {
+      // If timed out, poll briefly to see if session actually exists
+      const deadline = start + timeoutMs + 3000;
+      while (Date.now() < deadline) {
+        try {
+          const { data: { session: s } } = await sb.auth.getSession();
+          if (s) { return { data: { session: s }, error: null }; }
+        } catch {}
+        await delay(250);
+      }
+      return { data: null, error: new Error('Sign in timed out') };
+    }
+    return race;
+  } catch (e) {
+    return { data: null, error: e };
+  }
 }
 
 async function getCurrentUserSafe() {
@@ -1764,12 +1826,23 @@ async function loadUsers() {
 
 function formatListSnippetFromRow(m, meId) {
   if (!m) return '';
-  if (m.type === 'image') return 'Image';
-  if (m.type === 'gif') return 'GIF';
-  if (m.type === 'sticker') return 'Sticker';
-  if (m.type === 'tiktok') return 'TikTok';
-  return (m.content || '').slice(0, 80);
+  const incoming = m.receiver_id === meId; // if me is receiver, it's incoming
+  const prefix = incoming ? 'Received: ' : 'You: ';
+  const t = (m.type || 'text');
+  const isDel = (t === 'deleted') || (m.content === '::deleted::');
+  let body = '';
+  if (isDel) body = 'This message was deleted';
+  else if (t === 'text') {
+    const text = (m.content || '').replace(/\s+/g, ' ').trim();
+    body = text.length > 42 ? text.slice(0, 42) + '…' : text;
+  } else if (t === 'image') body = '[Photo]';
+  else if (t === 'video') body = '[Video]';
+  else if (t === 'gif') body = '[GIF]';
+  else if (t === 'audio') body = '[Audio]';
+  else body = '[Attachment]';
+  return prefix + body;
 }
+
 function updateUserListItemSnippet(peerId, row) {
   try {
     const li = userList?.querySelector(`li[data-user-id="${peerId}"]`);
@@ -2111,6 +2184,100 @@ function updateReplyBar() {
 }
 if (replyCancel) replyCancel.addEventListener('click', () => { replyTarget = null; updateReplyBar(); });
 
+function attachMessageInteractions(el, m) {
+  // Replace any prior handlers to avoid stacking stale closures
+  el.oncontextmenu = null;
+  el.ontouchstart = null;
+  el.ontouchend = null;
+  el.ontouchmove = null;
+  // Avoid re-binding swipe listeners on rerenders
+  if (el.dataset.boundSwipe === '1') {
+    // Context menu still needs rebinding because element content resets
+  } else {
+    el.dataset.boundSwipe = '1';
+  }
+  // Right click
+  el.oncontextmenu = (e) => { e.preventDefault(); showMsgMenu(e.clientX, e.clientY, m, el); };
+  // Long press (touch)
+  let touchTimer;
+  el.ontouchstart = (e) => {
+    clearTimeout(touchTimer);
+    touchTimer = setTimeout(() => { showMsgMenu(e.touches[0].clientX, e.touches[0].clientY, m, el); }, 500);
+  };
+  el.ontouchmove = () => clearTimeout(touchTimer);
+  el.ontouchend = () => clearTimeout(touchTimer);
+  // Swipe to reply
+  if (!el._swipeBound) {
+    el._swipeBound = true;
+    let sx = 0, sy = 0, horiz = false;
+    const TH = 25; // threshold px
+    const MAX = 90; // max visual drag in px
+    const resetTransform = () => { el.style.transition = 'transform 120ms ease'; el.style.transform = 'translateX(0px)'; setTimeout(() => { el.style.transition = ''; }, 140); };
+    el.addEventListener('touchstart', (e) => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; horiz = false; }, { passive: true });
+    el.addEventListener('touchmove', (e) => {
+      const t = e.touches[0];
+      const dx = t.clientX - sx; const dy = t.clientY - sy;
+      if (!horiz && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10) {
+        horiz = true;
+      }
+      if (horiz) {
+        // prevent vertical scroll when doing horizontal swipe
+        e.preventDefault();
+        const isMine = m.sender_id === currentUser?.id;
+        // lock direction: mine -> left only, others -> right only
+        const dirDx = isMine ? Math.min(0, dx) : Math.max(0, dx);
+        const clamped = Math.max(-MAX, Math.min(MAX, dirDx));
+        el.style.transform = `translateX(${clamped}px)`;
+        el.classList.add('swiping');
+      }
+    }, { passive: false });
+    el.addEventListener('touchend', (e) => {
+      const t = e.changedTouches[0];
+      const dx = t.clientX - sx; const dy = t.clientY - sy;
+      if (!horiz) { el.style.transform = ''; el.classList.remove('swiping'); return; }
+      el.classList.remove('swiping');
+      if (Math.abs(dx) < TH || Math.abs(dx) < Math.abs(dy)) { resetTransform(); return; }
+      const isMine = m.sender_id === currentUser?.id;
+      if (!isMine && dx > TH) {
+        console.debug('[Reply] swipe right');
+        el.style.transition = 'transform 120ms ease'; el.style.transform = `translateX(${Math.min(MAX, Math.max(TH, dx))}px)`;
+        setTimeout(() => { selectReply(m); resetTransform(); }, 120);
+      } else if (isMine && dx < -TH) {
+        console.debug('[Reply] swipe left');
+        el.style.transition = 'transform 120ms ease'; el.style.transform = `translateX(${Math.max(-MAX, Math.min(-TH, dx))}px)`;
+        setTimeout(() => { selectReply(m); resetTransform(); }, 120);
+      } else {
+        resetTransform();
+      }
+    });
+    // Mouse drag (desktop) to emulate swipe
+    let mx = 0, my = 0, down = false, mh = false;
+    el.addEventListener('mousedown', (e) => { if (e.button !== 0) return; down = true; mx = e.clientX; my = e.clientY; mh = false; });
+    document.addEventListener('mousemove', (e) => {
+      if (!down) return;
+      const dx = e.clientX - mx; const dy = e.clientY - my;
+      if (!mh && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 6) mh = true;
+      if (!mh) return;
+      const isMine = m.sender_id === currentUser?.id;
+      const dirDx = isMine ? Math.min(0, dx) : Math.max(0, dx);
+      const clamped = Math.max(-MAX, Math.min(MAX, dirDx));
+      el.style.transform = `translateX(${clamped}px)`;
+      el.classList.add('swiping');
+    });
+    document.addEventListener('mouseup', (e) => {
+      if (!down) return; down = false;
+      el.classList.remove('swiping');
+      const dx = e.clientX - mx; const dy = e.clientY - my;
+      if (!mh) { el.style.transform = ''; return; }
+      if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) { resetTransform(); return; }
+      const isMine = m.sender_id === currentUser?.id;
+      if (!isMine && dx > 40) { el.style.transition = 'transform 120ms ease'; el.style.transform = `translateX(${Math.min(MAX, Math.max(40, dx))}px)`; setTimeout(() => { selectReply(m); resetTransform(); }, 120); return; }
+      if (isMine && dx < -40) { el.style.transition = 'transform 120ms ease'; el.style.transform = `translateX(${Math.max(-MAX, Math.min(-40, dx))}px)`; setTimeout(() => { selectReply(m); resetTransform(); }, 120); return; }
+      resetTransform();
+    });
+  }
+}
+
 function selectReply(m) {
   replyTarget = m; updateReplyBar();
   try { console.debug('[Reply] Target set to id', m.id); } catch {}
@@ -2181,7 +2348,11 @@ function startInlineEdit(el, m) {
     if (!rows || rows.length === 0) { console.warn('Edit affected 0 rows; likely RLS or constraint. msgId=', m.id); toast('error', 'Edit failed', 'No rows updated (permissions?)'); return; }
     const updated = Array.isArray(rows) ? rows[0] : rows;
     if (updated) {
+      m = updated; // replace local ref
+      messagesById.set(updated.id, updated);
       renderMessage(updated, { replace: true });
+      refreshReplyPreviewsFor(updated.id);
+      if (replyTarget?.id === updated.id) { replyTarget = updated; updateReplyBar(); }
     } else {
       // Fallback optimistic UI
       m.content = newText;
@@ -2388,8 +2559,6 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
       teardownPresence();
       setLoggedInUI(false);
       show(calculatorScreen);
-      // Help user recover quickly by opening auth modal
-      try { if (authModal && typeof authModal.showModal === 'function') authModal.showModal(); } catch {}
     }
   });
 }
@@ -2397,20 +2566,13 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
 (async function init() {
   // Enforce dark mode by default
   applyTheme('dark');
+  try { await healAuthIfCorrupted(); } catch {}
   try { await refreshSession(); } catch { /* ignore */ }
 })();
 
 // Ensure listeners are bound even if DOM was not fully ready
 document.addEventListener('DOMContentLoaded', () => {
   try { console.debug('[CalcChat] DOM ready'); } catch {}
-  // Refresh session when returning to the tab/app to recover from background token expiry on mobile
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      try { refreshSession(); } catch {}
-    }
-  });
-  // If device regains network, re-validate session and recover UI
-  window.addEventListener('online', () => { try { refreshSession(); } catch {} });
   // Auth modal open
   const btn = document.getElementById('btn-open-auth');
   const dlg = document.getElementById('auth-modal');
