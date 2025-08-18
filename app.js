@@ -4,26 +4,6 @@ const sb = window.sb;
 // Boot log to confirm script loaded
 try { console.debug('[CalcChat] app.js loaded'); } catch {}
 
-async function signOutWithTimeout(timeoutMs = 5000) {
-  function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
-  try {
-    await Promise.race([
-      sb.auth.signOut(),
-      (async()=>{ await delay(timeoutMs); throw new Error('signOut timeout'); })()
-    ]);
-  } catch (e) {
-    // Fallback to local reset only
-    try { console.warn('[Auth] signOut timed out, doing local reset'); } catch {}
-  }
-}
-
-async function forceLocalAuthReset() {
-  try {
-    // Only clear local auth storage; do NOT recreate client here since `sb` is a const reference
-    clearSupabaseAuthStorageKeys();
-  } catch {}
-}
-
 // Tenor GIF/Stickers Picker Logic
 function openGifPicker(kind = 'gifs') {
   gifKind = kind === 'stickers' ? 'stickers' : 'gifs';
@@ -223,24 +203,8 @@ function setAvatar(el, name, url) {
 function updatePeerHeader(user) {
   if (!user) return;
   peerName.textContent = user.username || 'User';
-  // Prefer recent heartbeat or warmup for instant header updates, fallback to recency and DB flag
-  try {
-    const uid = String(user.id || '');
-    const now = Date.now();
-    const lastHb = uid ? (presenceHeartbeats.get(uid) || 0) : 0;
-    const hbOnline = lastHb && (now - lastHb) <= 2500;
-    const firstSeen = uid ? (presenceFirstSeenAt.get(uid) || 0) : 0;
-    const inWarmup = firstSeen && (now - firstSeen) < 3000;
-    const lastRaw = user.last_active || '';
-    const recent = lastRaw ? ((now - new Date(lastRaw).getTime()) < 5000) : false;
-    const online = hbOnline || inWarmup || recent || !!user.is_online;
-    peerStatus.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
-  } catch {
-    // Fallback
-    peerStatus.textContent = isOnlineFrom(user) ? 'Active now' : (user.last_active ? formatTimeAgo(user.last_active) : 'Offline');
-  }
+  peerStatus.textContent = user.is_online ? 'Active now' : (user.last_active ? formatTimeAgo(user.last_active) : 'Offline');
   setAvatar(peerAvatar, user.username || 'User', user.avatar_url);
-  try { if (peerAvatar && user.id) { peerAvatar.dataset.userId = user.id; decorateAvatarWithStory(peerAvatar, user.id); } } catch {}
 }
 let meProfile = null;   // fetched profile
 let activePeerId = null;
@@ -301,66 +265,9 @@ const passErr = document.getElementById('passcode-error');
 const passcodeClose = document.getElementById('passcode-close');
 const btnSavePasscode = document.getElementById('btn-save-passcode');
 
-// Password visibility toggles and strength meter
-const visibilityToggles = document.querySelectorAll('.toggle-visibility');
-visibilityToggles.forEach(btn => {
-  btn.addEventListener('click', () => {
-    const id = btn.getAttribute('data-target');
-    const input = document.getElementById(id);
-    if (!input) return;
-    const showing = input.type === 'text';
-    input.type = showing ? 'password' : 'text';
-    btn.setAttribute('aria-pressed', String(!showing));
-  });
-});
-
-const pwStrengthEl = document.getElementById('pw-strength');
-function updatePwStrength() {
-  if (!pwStrengthEl || !signupPassword) return;
-  const pw = signupPassword.value || '';
-  let score = 0;
-  if (pw.length >= 6) score++;
-  if (pw.length >= 10) score++;
-  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
-  if (/[0-9]/.test(pw) || /[^A-Za-z]/.test(pw)) score++;
-  if (score > 4) score = 4;
-  const labels = ['Too weak','Weak','Fair','Good','Strong'];
-  const percent = Math.max(0, Math.min(100, Math.round((score/4)*100)));
-  pwStrengthEl.classList.remove('score-0','score-1','score-2','score-3','score-4');
-  pwStrengthEl.classList.add(`score-${score}`);
-  pwStrengthEl.innerHTML = `
-    <div class="strength-bar"><div class="fill" style="width:${percent}%"></div></div>
-    <div class="strength-label">${labels[score]}</div>
-  `;
-}
-if (signupPassword) {
-  signupPassword.addEventListener('input', updatePwStrength);
-  // initialize on load in case browser restores value
-  setTimeout(updatePwStrength, 0);
-}
-
-// Enforce numeric-only input for all passcode fields
-(function enforceNumericPasscodeInputs(){
-  const enforce = (el) => {
-    if (!el) return;
-    try { el.setAttribute('inputmode','numeric'); el.setAttribute('pattern','[0-9]*'); } catch {}
-    el.addEventListener('input', () => {
-      // strip non-digits and enforce maxlength if present
-      let v = (el.value || '').replace(/\D+/g,'');
-      const ml = el.maxLength && el.maxLength > 0 ? el.maxLength : null;
-      if (ml) v = v.slice(0, ml);
-      if (el.value !== v) el.value = v;
-      // clear error state while typing
-      try { el.removeAttribute('aria-invalid'); el.classList.remove('input-error'); } catch {}
-    });
-  };
-  enforce(signupPass1); enforce(signupPass2); enforce(pass1); enforce(pass2);
-})();
-
 const meUsername = document.getElementById('me-username');
 const meStatus = document.getElementById('me-status');
 const meAvatar = document.getElementById('me-avatar');
-const meSection = document.querySelector('.me');
 const userList = document.getElementById('user-list');
 const userSearch = document.getElementById('user-search');
 const convoHeader = document.getElementById('conversation-header');
@@ -396,43 +303,6 @@ const replyCancel = document.getElementById('reply-cancel');
 let replyTarget = null;
 const messagesById = new Map();
 
-// Stories UI elements
-const storiesBar = document.getElementById('stories-bar');
-const btnAddStory = document.getElementById('btn-add-story');
-const btnAddStoryMobile = document.getElementById('btn-add-story-mobile');
-// Story viewer elements
-const storyViewer = document.getElementById('story-viewer');
-const svAvatar = document.getElementById('sv-avatar');
-const svUsername = document.getElementById('sv-username');
-const svTimestamp = document.getElementById('sv-timestamp');
-const svImg = document.getElementById('sv-media-img');
-const svVideo = document.getElementById('sv-media-video');
-const svCaption = document.getElementById('sv-caption');
-const svPrev = document.getElementById('sv-prev');
-const svNext = document.getElementById('sv-next');
-const svCloseBtn = document.getElementById('sv-close');
-const svReplyInput = document.getElementById('sv-reply-input');
-const svReplySend = document.getElementById('sv-reply-send');
-// Add Story modal elements
-const addStoryModal = document.getElementById('add-story-modal');
-const addStoryForm = document.getElementById('add-story-form');
-const addStoryFile = document.getElementById('story-file');
-const addStoryCaption = document.getElementById('story-caption');
-const addStoryCancel = document.getElementById('add-story-cancel');
-const addStorySubmitBtn = document.getElementById('add-story-submit');
-// Modernized Add Story UI elements
-const storyDropzone = document.getElementById('story-dropzone');
-const storyPreviewWrap = document.getElementById('story-preview');
-const storyPreviewImg = document.getElementById('story-preview-img');
-const storyPreviewVideo = document.getElementById('story-preview-video');
-const btnPickStory = document.getElementById('btn-pick-story');
-const storyFileMeta = document.getElementById('story-file-meta');
-const storyFiletype = document.getElementById('story-filetype');
-const storyFilename = document.getElementById('story-filename');
-const storyFilesize = document.getElementById('story-filesize');
-const storyClearBtn = document.getElementById('story-clear');
-const storyProgress = document.getElementById('story-progress');
-
 // Profile modal elements
 const profileModal = document.getElementById('profile-modal');
 const profileForm = document.getElementById('profile-form');
@@ -461,120 +331,6 @@ if (iv) {
     if (e.target === iv) { try { iv.close(); } catch {} }
   });
 }
-
-// Open Add Story modal (desktop header and mobile profile)
-function openAddStoryModal() {
-  if (!addStoryModal || !addStoryForm) return;
-  if (!currentUser) { toast('error','Not signed in','Please sign in to post a story.'); return; }
-  try { addStoryForm.reset(); } catch {}
-  // reset modern UI state
-  try {
-    if (storyPreviewWrap) storyPreviewWrap.hidden = true;
-    if (storyPreviewImg) { storyPreviewImg.src = ''; storyPreviewImg.hidden = true; }
-    if (storyPreviewVideo) { storyPreviewVideo.src = ''; storyPreviewVideo.hidden = true; }
-    if (storyFileMeta) storyFileMeta.hidden = true;
-    if (storyProgress) storyProgress.hidden = true;
-  } catch {}
-  if (typeof addStoryModal.showModal === 'function') addStoryModal.showModal();
-}
-if (btnAddStory) btnAddStory.addEventListener('click', openAddStoryModal);
-if (btnAddStoryMobile) btnAddStoryMobile.addEventListener('click', openAddStoryModal);
-
-// ========= Modern Add Story wiring =========
-// Helpers
-function formatBytes(bytes) {
-  if (!bytes && bytes !== 0) return '';
-  const sizes = ['B','KB','MB','GB'];
-  if (bytes === 0) return '0 B';
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), sizes.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
-}
-
-function updateStoryUIForFile(file) {
-  if (!file) {
-    if (storyPreviewWrap) storyPreviewWrap.hidden = true;
-    if (storyPreviewImg) { storyPreviewImg.hidden = true; storyPreviewImg.src = ''; }
-    if (storyPreviewVideo) { storyPreviewVideo.hidden = true; storyPreviewVideo.src = ''; }
-    if (storyFileMeta) storyFileMeta.hidden = true;
-    return;
-  }
-  // file meta chips
-  if (storyFileMeta) storyFileMeta.hidden = false;
-  if (storyFiletype) storyFiletype.textContent = file.type || 'unknown';
-  if (storyFilename) storyFilename.textContent = file.name || 'untitled';
-  if (storyFilesize) storyFilesize.textContent = formatBytes(file.size || 0);
-  // preview
-  const isVideo = /^video\//.test(file.type);
-  const url = URL.createObjectURL(file);
-  if (storyPreviewWrap) storyPreviewWrap.hidden = false;
-  if (isVideo) {
-    if (storyPreviewImg) { storyPreviewImg.hidden = true; storyPreviewImg.src = ''; }
-    if (storyPreviewVideo) {
-      storyPreviewVideo.hidden = false;
-      storyPreviewVideo.src = url;
-      try { storyPreviewVideo.play().catch(()=>{}); } catch {}
-    }
-  } else {
-    if (storyPreviewVideo) { storyPreviewVideo.hidden = true; storyPreviewVideo.src = ''; }
-    if (storyPreviewImg) {
-      storyPreviewImg.hidden = false;
-      storyPreviewImg.src = url;
-    }
-  }
-}
-
-function setStoryFileFromDrop(file) {
-  if (!addStoryFile) return;
-  try {
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    addStoryFile.files = dt.files;
-  } catch {}
-  updateStoryUIForFile(file);
-}
-
-// Event wiring
-if (addStoryForm) addStoryForm.addEventListener('submit', handleAddStorySubmit);
-if (addStoryCancel) addStoryCancel.addEventListener('click', () => { try { addStoryModal?.close(); } catch {} });
-// Clicking the button inside the dropzone must not bubble to the dropzone's click handler
-if (btnPickStory) btnPickStory.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); addStoryFile?.click(); });
-if (storyClearBtn) storyClearBtn.addEventListener('click', () => { if (addStoryFile) addStoryFile.value = ''; updateStoryUIForFile(null); });
-if (addStoryFile) addStoryFile.addEventListener('change', () => updateStoryUIForFile(addStoryFile.files?.[0]));
-if (storyDropzone) {
-  const enter = (e) => { e.preventDefault(); e.stopPropagation(); storyDropzone.classList.add('drag'); };
-  const over = (e) => { e.preventDefault(); e.stopPropagation(); };
-  const leave = (e) => { e.preventDefault(); e.stopPropagation(); storyDropzone.classList.remove('drag'); };
-  const drop = (e) => {
-    e.preventDefault(); e.stopPropagation(); storyDropzone.classList.remove('drag');
-    const file = e.dataTransfer?.files?.[0];
-    if (!file) return;
-    if (!/^image\//.test(file.type) && !/^video\//.test(file.type)) { toast('error','Unsupported file','Choose an image or a video.'); return; }
-    if (file.size > 20 * 1024 * 1024) { toast('error','Too large','Max 20 MB'); return; }
-    setStoryFileFromDrop(file);
-  };
-  storyDropzone.addEventListener('dragenter', enter);
-  storyDropzone.addEventListener('dragover', over);
-  storyDropzone.addEventListener('dragleave', leave);
-  storyDropzone.addEventListener('drop', drop);
-  // Only trigger when clicking the dropzone area itself, not the inner button
-  storyDropzone.addEventListener('click', (e) => {
-    const fromBtn = e.target && e.target.closest && e.target.closest('#btn-pick-story');
-    if (fromBtn) return; // button handler already triggered
-    addStoryFile?.click();
-  });
-}
-
-// Open story viewer when clicking any avatar that has a story
-document.addEventListener('click', (e) => {
-  const el = e.target && e.target.closest ? e.target.closest('.avatar.has-story') : null;
-  if (!el) return;
-  const uid = el.dataset && el.dataset.userId;
-  if (!uid) return;
-  // Avoid if inside a button with explicit actions (e.g., upload avatar)
-  const inButton = e.target.closest('button');
-  if (inButton && !inButton.classList.contains('avatar')) return;
-  openStoryViewer(uid);
-});
 const btnSaveProfile = document.getElementById('btn-save-profile');
 const btnProfileClose = document.getElementById('profile-close');
 const btnUploadAvatar = document.getElementById('btn-upload-avatar');
@@ -594,11 +350,6 @@ async function getCurrentUserSafe() {
 function show(view) {
   for (const v of document.querySelectorAll('.view')) v.classList.remove('active');
   view.classList.add('active');
-  // Toggle body class for mobile header only when a conversation is open
-  try {
-    const inboxOpen = (view === chatScreen) && chatScreen.classList.contains('show-convo');
-    document.body.classList.toggle('chat-inbox', inboxOpen);
-  } catch {}
   updatePasscodeButtonVisibility();
 }
 function isLoggedIn(){ return !!currentUser; }
@@ -618,7 +369,6 @@ function setLoggedInUI(loggedIn) {
     meUsername.textContent = 'Anonymous';
     meStatus.textContent = 'Offline';
     setAvatar(meAvatar, 'Anonymous', null);
-    try { meSection?.classList.remove('online'); } catch {}
   }
 }
 function shake(el) {
@@ -652,7 +402,7 @@ function renderTikTokEmbed(url) {
   s.src = 'https://www.tiktok.com/embed.js';
   s.async = true;
   document.body.appendChild(s);
-  return w;
+  return wrap;
 }
 
 // Toasts
@@ -669,132 +419,39 @@ function toast(type, title, msg) {
 // Calculator state
 let input = '';
 function updateDisplay() {
-  if (!input) { calcDisplay.textContent = '0'; return; }
-  const hasOp = /[+\-*/]/.test(input);
-  // Do not show preview for passcode-like input (digits only)
-  if (hasOp && !/^[0-9]{4,}$/.test(input)) {
-    const val = evalExpression(input);
-    if (val !== null) { calcDisplay.textContent = `${input} = ${val}`; return; }
-  }
-  calcDisplay.textContent = input;
+  calcDisplay.textContent = input || '0';
 }
-
-// Helpers for safe calculation
-const isOp = (c) => ['+','-','*','/'].includes(c);
-function canAppendDot(expr) {
-  // allow one dot per current number segment
-  const seg = (expr || '').split(/[+\-*/]/).pop();
-  return seg.indexOf('.') === -1;
-}
-function sanitizeAppend(expr, key) {
-  if (!expr) {
-    if (isOp(key)) return '';// don't start with operator
-    if (key === '.') return '0.';
-    return key;
-  }
-  const last = expr.slice(-1);
-  if (isOp(key)) {
-    // prevent two operators; replace last operator
-    if (isOp(last)) return expr.slice(0, -1) + key;
-    if (last === '.') return expr; // don't allow op right after dot
-    return expr + key;
-  }
-  if (key === '.') {
-    return canAppendDot(expr) ? (expr + '.') : expr;
-  }
-  // digits
-  if (/^[0-9]$/.test(key)) return expr + key;
-  return expr;
-}
-
-function evalExpression(expr) {
-  // Only allow digits, operators, dots, and spaces
-  if (!/^[-+*/0-9.\s]+$/.test(expr)) return null;
-  // Disallow sequences like **, //, ++, --, ..
-  if (/([+\-*/]{2,})|\.\./.test(expr)) return null;
-  // Remove trailing operator/dot before evaluation
-  let e = expr.replace(/\s+/g,'');
-  while (e && (isOp(e.slice(-1)) || e.slice(-1) === '.')) e = e.slice(0,-1);
-  if (!e) return null;
-  // Shunting-yard to RPN then evaluate
-  const out = [];
-  const ops = [];
-  const prec = { '+':1, '-':1, '*':2, '/':2 };
-  let num = '';
-  for (let i=0;i<e.length;i++) {
-    const ch = e[i];
-    if (/[0-9.]/.test(ch)) { num += ch; continue; }
-    if (isOp(ch)) {
-      if (num !== '') { out.push(parseFloat(num)); num = ''; }
-      while (ops.length && prec[ops[ops.length-1]] >= prec[ch]) out.push(ops.pop());
-      ops.push(ch);
-      continue;
-    }
-    // invalid
-    return null;
-  }
-  if (num !== '') out.push(parseFloat(num));
-  while (ops.length) out.push(ops.pop());
-  const st = [];
-  for (const tok of out) {
-    if (typeof tok === 'number') { st.push(tok); continue; }
-    const b = st.pop(); const a = st.pop();
-    if (a === undefined || b === undefined) return null;
-    let v = null;
-    if (tok === '+') v = a + b;
-    else if (tok === '-') v = a - b;
-    else if (tok === '*') v = a * b;
-    else if (tok === '/') v = b === 0 ? Infinity : a / b;
-    st.push(v);
-  }
-  const res = st.pop();
-  if (st.length) return null;
-  if (!isFinite(res)) return null;
-  // limit precision
-  return parseFloat(Number(res).toFixed(10)) * 1; // coerce -0 to 0
-}
-
-async function handleEqual() {
-  if (!input) { updateDisplay(); return; }
-  // Unlock if logged in and input is digits-only (4+)
-  if (session && /^[0-9]{4,}$/.test(input)) {
-    const { data, error } = await sb.rpc('verify_passcode', { passcode: input });
-    if (error) { console.error(error); shake(calcDisplay); return; }
-    if (data === true) { input = ''; updateDisplay(); await enterChat(); return; }
-    shake(calcDisplay); return;
-  }
-  // Otherwise evaluate expression
-  const val = evalExpression(input);
-  if (val === null) { shake(calcDisplay); return; }
-  input = String(val);
-  updateDisplay();
-}
-
-function handleKey(key) {
-  if (key === 'C') { input = ''; updateDisplay(); return; }
-  if (key === '⌫') { input = input.slice(0,-1); updateDisplay(); return; }
-  if (key === '=') { handleEqual(); return; }
-  input = sanitizeAppend(input, key);
-  updateDisplay();
-}
-
 calcKeys.forEach(btn => {
-  btn.addEventListener('click', () => handleKey(btn.dataset.key));
-});
-
-// Keyboard input
-window.addEventListener('keydown', (e) => {
-  // Ignore typing when focus is inside an input/textarea/contenteditable
-  const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-  // Only handle keys when the calculator screen is visible
-  if (!calculatorScreen?.classList.contains('active')) return;
-
-  const k = e.key;
-  if (/^[0-9]$/.test(k)) { e.preventDefault(); handleKey(k); }
-  else if (k === 'Backspace') { e.preventDefault(); handleKey('⌫'); }
-  else if (k === 'Enter' || k === '=') { e.preventDefault(); handleKey('='); }
-  else if (k === '.' || k === '+' || k === '-' || k === '*' || k === '/') { e.preventDefault(); handleKey(k); }
+  btn.addEventListener('click', async () => {
+    const k = btn.dataset.key;
+    if (k === 'C') { input = ''; }
+    else if (k === '⌫') { input = input.slice(0, -1); }
+    else if (k === '=') {
+      if (!session) {
+        // calculator mode before login
+        try {
+          // simple calc: eval digits only
+          calcDisplay.textContent = input || '0';
+        } catch {}
+        return;
+      }
+      // verify passcode
+      if (!input) return;
+      const { data, error } = await sb.rpc('verify_passcode', { passcode: input });
+      if (error) {
+        console.error(error); shake(calcDisplay); return;
+      }
+      if (data === true) {
+        input = ''; updateDisplay();
+        await enterChat();
+      } else {
+        shake(calcDisplay);
+      }
+    } else {
+      if (/^[0-9]$/.test(k)) input += k;
+    }
+    updateDisplay();
+  });
 });
 
 // Auth modal tabs
@@ -805,234 +462,6 @@ for (const t of tabs) {
     t.classList.add('active');
     document.getElementById(t.dataset.tab).classList.add('active');
   });
-}
-
-// =============================
-// Stories: data, loading, viewer, add, reply
-// =============================
-const STORIES_BUCKET = 'stories';
-let storiesByUser = new Map(); // userId -> { user: {id,username,avatar_url}, stories: [rows], allViewed: bool }
-let storyOrder = []; // ordered list of userIds for bar
-let currentView = { userId: null, index: 0 };
-let storiesChan = null;
-
-async function loadStories() {
-  try {
-    if (!storiesBar) return;
-    storiesBar.innerHTML = '';
-    const meUser = await getCurrentUserSafe(); if (!meUser) return;
-    // Fetch non-expired stories
-    const { data: stories, error } = await sb.from('stories')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(500);
-    if (error) { console.warn('loadStories err', error); return; }
-    const ids = (stories || []).map(s => s.id);
-    // Fetch my view rows
-    let viewedSet = new Set();
-    if (ids.length) {
-      try {
-        const { data: myViews } = await sb.from('story_views')
-          .select('story_id')
-          .eq('viewer_id', meUser.id)
-          .in('story_id', ids);
-        (myViews || []).forEach(v => viewedSet.add(v.story_id));
-      } catch {}
-    }
-    // Fetch public profiles for mapping
-    const { data: profs } = await sb.rpc('get_public_profiles');
-    const profMap = new Map((profs || []).map(p => [p.id, p]));
-    // Group by user
-    storiesByUser = new Map();
-    for (const s of stories || []) {
-      let entry = storiesByUser.get(s.user_id);
-      if (!entry) {
-        entry = { user: profMap.get(s.user_id) || { id: s.user_id, username: 'User', avatar_url: null }, stories: [], allViewed: true };
-        storiesByUser.set(s.user_id, entry);
-      }
-      entry.stories.push(s);
-      if (!viewedSet.has(s.id)) entry.allViewed = false;
-    }
-    // Order: me first (if has stories), then others by most recent story
-    const sorted = Array.from(storiesByUser.entries()).sort((a,b) => {
-      const at = new Date(a[1].stories[0]?.created_at || 0).getTime();
-      const bt = new Date(b[1].stories[0]?.created_at || 0).getTime();
-      return bt - at;
-    });
-    storyOrder = sorted.map(([uid]) => uid);
-    // Update avatars with story rings
-    decorateAllAvatars();
-    // The old stories bar can be hidden via CSS; keep render available if needed
-    renderStoriesBar();
-  } catch (e) { console.warn('loadStories exception', e); }
-}
-
-// Ensure legacy storage URLs include "/public/" segment
-function normalizeStoryUrl(url) {
-  try {
-    if (!url || typeof url !== 'string') return url;
-    return url.replace('/storage/v1/object/stories/', '/storage/v1/object/public/stories/');
-  } catch { return url; }
-}
-
-// Decorate avatar with story ring if user has active stories
-function decorateAvatarWithStory(avatarEl, userId) {
-  if (!avatarEl || !userId) return;
-  const entry = storiesByUser.get(userId);
-  const has = !!entry && (entry.stories?.length > 0);
-  avatarEl.classList.toggle('has-story', has);
-  avatarEl.classList.toggle('story-viewed', has && !!entry?.allViewed);
-}
-
-function decorateAllAvatars() {
-  try {
-    document.querySelectorAll('.avatar[data-user-id]').forEach((el) => {
-      const uid = el.dataset.userId;
-      if (uid) decorateAvatarWithStory(el, uid);
-    });
-    if (meAvatar && currentUser?.id) decorateAvatarWithStory(meAvatar, currentUser.id);
-    if (peerAvatar && peerAvatar.dataset.userId) decorateAvatarWithStory(peerAvatar, peerAvatar.dataset.userId);
-  } catch {}
-}
-
-function renderStoriesBar() {
-  if (!storiesBar) return;
-  storiesBar.innerHTML = '';
-  const frag = document.createDocumentFragment();
-  for (const uid of storyOrder) {
-    const entry = storiesByUser.get(uid); if (!entry) continue;
-    const item = document.createElement('div'); item.className = 'story' + (entry.allViewed ? ' viewed' : '');
-    const ring = document.createElement('div'); ring.className = 'ring';
-    const av = document.createElement('div'); av.className = 'avatar'; setAvatar(av, entry.user?.username || 'User', entry.user?.avatar_url);
-    ring.appendChild(av);
-    const name = document.createElement('div'); name.className = 'name'; name.textContent = entry.user?.username || 'User';
-    item.appendChild(ring); item.appendChild(name);
-    item.addEventListener('click', () => openStoryViewer(uid));
-    frag.appendChild(item);
-  }
-  storiesBar.appendChild(frag);
-}
-
-function subscribeStories() {
-  try {
-    if (storiesChan) { sb.removeChannel(storiesChan); storiesChan = null; }
-  } catch {}
-  storiesChan = sb.channel('stories-feed')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stories' }, () => { loadStories(); })
-    .subscribe();
-}
-
-function setStoryMedia(story) {
-  if (!story) return;
-  try { svCaption.hidden = !story.caption; if (story.caption) svCaption.textContent = story.caption; } catch {}
-  try { svTimestamp.textContent = formatTimeAgo(story.created_at); } catch {}
-  const author = storiesByUser.get(story.user_id)?.user;
-  setAvatar(svAvatar, author?.username || 'User', author?.avatar_url);
-  if (svUsername) svUsername.textContent = author?.username || 'User';
-  // Switch media
-  const mediaUrl = normalizeStoryUrl(story.media_url);
-  if (story.media_type === 'video') {
-    if (svImg) svImg.hidden = true;
-    if (svVideo) { svVideo.hidden = false; svVideo.src = mediaUrl; try { svVideo.play().catch(()=>{}); } catch {} }
-  } else { // image or gif
-    if (svVideo) { try { svVideo.pause(); } catch {}; svVideo.hidden = true; svVideo.src = ''; }
-    if (svImg) { svImg.hidden = false; svImg.src = mediaUrl; }
-  }
-}
-
-async function recordStoryView(story) {
-  try {
-    const meUser = await getCurrentUserSafe(); if (!meUser) return;
-    await sb.from('story_views').upsert({ story_id: story.id, viewer_id: meUser.id }, { onConflict: 'story_id,viewer_id', ignoreDuplicates: true });
-  } catch (e) {
-    // fallback: ignore unique violation
-  }
-}
-
-function openStoryViewer(userId, startIndex = null) {
-  const entry = storiesByUser.get(userId); if (!entry) return;
-  currentView.userId = userId;
-  // Prefer first unviewed
-  let idx = startIndex != null ? startIndex : entry.stories.findIndex(s => !isStoryViewedLocal(s.id));
-  if (idx < 0) idx = 0;
-  currentView.index = idx;
-  const story = entry.stories[idx];
-  setStoryMedia(story);
-  recordStoryView(story).then(() => loadStories());
-  if (storyViewer && typeof storyViewer.showModal === 'function') storyViewer.showModal();
-}
-
-function isStoryViewedLocal(storyId) {
-  // We use ring state computed at loadStories time; after a view, we reload
-  for (const [, entry] of storiesByUser) {
-    if (entry.stories.some(s => s.id === storyId)) {
-      // approximate: if not in any unviewed set at load time, treat as viewed
-      // precise check requires a local set; for simplicity rely on reload
-      return entry.allViewed; // may be inaccurate per-story; we reload after view
-    }
-  }
-  return false;
-}
-
-function nextStory(step) {
-  const entry = storiesByUser.get(currentView.userId); if (!entry) return;
-  let idx = currentView.index + step;
-  if (idx < 0) idx = 0;
-  if (idx >= entry.stories.length) {
-    // end: close viewer
-    try { if (storyViewer) storyViewer.close(); } catch {}
-    return;
-  }
-  currentView.index = idx;
-  const story = entry.stories[idx];
-  setStoryMedia(story);
-  recordStoryView(story).then(() => loadStories());
-}
-
-async function handleAddStorySubmit(e) {
-  e.preventDefault();
-  console.debug('[Stories] Submit clicked');
-  const meUser = await getCurrentUserSafe(); if (!meUser) { toast('error','Not signed in','Please sign in.'); return; }
-  const file = addStoryFile?.files?.[0];
-  if (!file) { toast('error','No file selected','Please choose an image or video.'); return; }
-  if (!/^image\//.test(file.type) && !/^video\//.test(file.type)) { toast('error','Unsupported file','Choose an image or a video.'); return; }
-  if (file.size > 20 * 1024 * 1024) { toast('error','Too large','Max 20 MB'); return; }
-  const prevText = addStorySubmitBtn ? addStorySubmitBtn.textContent : '';
-  if (addStorySubmitBtn) { addStorySubmitBtn.disabled = true; addStorySubmitBtn.textContent = 'Posting...'; }
-  if (storyProgress) storyProgress.hidden = false; // show indeterminate progress
-  try {
-    const media_type = /^video\//.test(file.type) ? 'video' : (file.type.includes('gif') ? 'gif' : 'image');
-    const safe = `${meUser.id}/${Date.now()}-${(file.name||'story').replace(/[^a-zA-Z0-9-_.]/g,'_')}`;
-    console.debug('[Stories] Uploading to bucket', STORIES_BUCKET, 'path', safe);
-    // Upload
-    const up = await sb.storage.from(STORIES_BUCKET).upload(safe, file, { contentType: file.type, upsert: false });
-    if (up.error) { console.warn('[Stories] Upload error', up.error); toast('error','Upload failed', up.error.message); return; }
-    const { data: pub } = sb.storage.from(STORIES_BUCKET).getPublicUrl(safe);
-    const media_url = normalizeStoryUrl(pub?.publicUrl);
-    if (!media_url) { toast('error','URL error','Could not resolve public URL'); return; }
-    console.debug('[Stories] Public URL', media_url);
-    const caption = addStoryCaption?.value?.trim() || null;
-    const { error: insErr } = await sb.from('stories').insert({ user_id: meUser.id, media_url, media_type, caption });
-    if (insErr) { console.warn('[Stories] Insert error', insErr); toast('error','Post failed', insErr.message); return; }
-    try { addStoryForm?.reset(); addStoryModal?.close(); } catch {}
-    await loadStories();
-    toast('success','Story posted','Your story is live for 24 hours.');
-  } finally {
-    if (addStorySubmitBtn) { addStorySubmitBtn.disabled = false; addStorySubmitBtn.textContent = prevText || 'Post'; }
-    if (storyProgress) storyProgress.hidden = true;
-  }
-}
-
-async function sendStoryReply(text) {
-  const entry = storiesByUser.get(currentView.userId); if (!entry) return;
-  const authorId = entry.user?.id || currentView.userId;
-  const meUser = await getCurrentUserSafe(); if (!meUser) return toast('error','Not signed in','Please sign in.');
-  const body = (text || '').trim(); if (!body) return;
-  const { error } = await sb.from('messages').insert({ sender_id: meUser.id, receiver_id: authorId, type: 'text', content: body });
-  if (error) { toast('error','Reply failed', error.message); return; }
-  // Jump to DM thread with author
-  openConversation(authorId);
-  try { storyViewer?.close(); } catch {}
 }
 
 btnOpenAuth.addEventListener('click', () => authModal.showModal());
@@ -1055,27 +484,7 @@ btnSignup.addEventListener('click', async () => {
   const email = signupEmail.value.trim();
   const username = signupUsername.value.trim();
   const password = signupPassword.value;
-  // Require passcode at signup
-  const p1 = signupPass1?.value?.trim() || '';
-  const p2 = signupPass2?.value?.trim() || '';
-  // reset error states
-  [signupEmail, signupUsername, signupPassword, signupPass1, signupPass2].forEach(el => { try { el.removeAttribute('aria-invalid'); el.classList.remove('input-error'); } catch {} });
-  if (!email || !username || !password) {
-    if (!email) signupEmail.setAttribute('aria-invalid','true');
-    if (!username) signupUsername.setAttribute('aria-invalid','true');
-    if (!password) signupPassword.setAttribute('aria-invalid','true');
-    signupPass1.setAttribute('aria-invalid', String(!/^[0-9]{4,}$/.test(p1)));
-    signupPass2.setAttribute('aria-invalid', String(p1 !== p2));
-    authError.textContent = 'Fill in email, username, password, and a valid passcode.';
-    authError.hidden = false; return;
-  }
-  if (!/^[0-9]{4,}$/.test(p1) || p1 !== p2) {
-    if (!/^[0-9]{4,}$/.test(p1)) signupPass1.setAttribute('aria-invalid','true');
-    if (p1 !== p2) signupPass2.setAttribute('aria-invalid','true');
-    authError.textContent = 'Enter a numeric passcode (at least 4 digits) and confirm it.';
-    authError.hidden = false;
-    return;
-  }
+  if (!email || !username || !password) return;
   btnSignup.disabled = true; btnSignup.textContent = 'Creating...';
   try {
     const { data, error } = await sb.auth.signUp({ email, password, options: { data: { username } } });
@@ -1084,11 +493,15 @@ btnSignup.addEventListener('click', async () => {
     if (data?.session) {
       await refreshSession();
       await ensureProfile(username);
-      // Set required passcode now
-      const { error: pcErr } = await sb.rpc('set_passcode', { passcode: p1 });
-      if (!pcErr) {
-        const { data: me } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
-        meProfile = me;
+      // If user provided a valid passcode during signup, set it now
+      const p1 = signupPass1?.value?.trim() || '';
+      const p2 = signupPass2?.value?.trim() || '';
+      if (p1 && /^[0-9]{4,}$/.test(p1) && p1 === p2) {
+        const { error: pcErr } = await sb.rpc('set_passcode', { passcode: p1 });
+        if (!pcErr) {
+          const { data: me } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
+          meProfile = me;
+        }
       }
       toast('success','Account created','You are signed in.');
       authModal.close();
@@ -1097,8 +510,14 @@ btnSignup.addEventListener('click', async () => {
       return;
     }
     // If session missing, attempt immediate sign in
-    // Stash required passcode to apply right after sign-in
-    try { sessionStorage.setItem('pending_passcode', p1); } catch {}
+    // Stash pending passcode to apply right after sign-in
+    (function stashPendingPasscode(){
+      const p1 = signupPass1?.value?.trim() || '';
+      const p2 = signupPass2?.value?.trim() || '';
+      if (p1 && /^[0-9]{4,}$/.test(p1) && p1 === p2) {
+        try { sessionStorage.setItem('pending_passcode', p1); } catch {}
+      }
+    })();
     const { error: siErr } = await sb.auth.signInWithPassword({ email, password });
     if (siErr) {
       toast('success','Account created','Now sign in with your credentials.');
@@ -1118,37 +537,9 @@ btnSignin.addEventListener('click', async () => {
   const password = signinPassword.value;
   btnSignin.disabled = true; btnSignin.textContent = 'Signing in...';
   try {
-    // Heal any corrupted local session first, then ensure a clean sign-in
-    await healAuthIfCorrupted();
-    try {
-      const { data: { session: cur } } = await sb.auth.getSession();
-      if (cur) {
-        await signOutWithTimeout();
-        clearSessionBackup();
-        await forceLocalAuthReset();
-      }
-    } catch {}
-    let { data, error } = await signInWithTimeout(email, password, 15000);
-    if (error) {
-      // One-shot local reset + retry to heal stuck mobile states
-      await forceLocalAuthReset();
-      ({ data, error } = await signInWithTimeout(email, password, 15000));
-      if (error) throw error;
-    }
-    // Fallback: if event doesn't fire promptly, proceed when session exists
-    try {
-      await refreshSession();
-      if (currentUser) {
-        await ensureProfile();
-        setLoggedInUI(true);
-        if (authModal?.close) authModal.close();
-        show(calculatorScreen);
-        try {
-          const cur = (await sb.auth.getSession()).data?.session;
-          if (cur) backupSession(cur);
-        } catch {}
-      }
-    } catch {}
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) { throw error; }
+    // onAuthStateChange listener will proceed
   } catch (e) {
     authError.textContent = e?.message || 'Sign in failed'; authError.hidden = false; toast('error','Sign in failed', authError.textContent);
   } finally {
@@ -1158,12 +549,9 @@ btnSignin.addEventListener('click', async () => {
 
 btnLogout.addEventListener('click', async () => {
   await setPresence(false);
-  await signOutWithTimeout();
-  clearSessionBackup();
-  await forceLocalAuthReset();
+  await sb.auth.signOut();
   session = null; currentUser = null; meProfile = null; activePeerId = null;
   setLoggedInUI(false);
-  teardownPresence();
   show(calculatorScreen);
   toast('success','Signed out','You have been logged out.');
 });
@@ -1173,145 +561,7 @@ async function refreshSession() {
   const { data: { session: s } } = await sb.auth.getSession();
   session = s;
   currentUser = s?.user || null;
-  try { console.debug('[Auth] refreshSession -> hasSession:', !!session, 'userId:', currentUser?.id || null); } catch {}
   setLoggedInUI(!!currentUser);
-  // On reload with a valid session, eagerly load profile so UI doesn't show 'Anonymous'
-  try {
-    if (currentUser) {
-      await ensureProfile();
-    }
-  } catch {}
-}
-
-// Attempt to detect and clear corrupted Supabase auth cache entries (be conservative)
-async function healAuthIfCorrupted() {
-  try {
-    // Validate that stored token JSON (if present) is parseable
-    validateSupabaseStorageJSON();
-  } catch {}
-}
-
-function validateSupabaseStorageJSON() {
-  try {
-    const keys = supabaseAuthStorageKeys();
-    for (const k of keys) {
-      const v = localStorage.getItem(k);
-      if (v == null) continue;
-      try { JSON.parse(v); } catch (e) {
-        try { console.warn('[Auth] Invalid JSON in', k, '-> clearing'); } catch {}
-        localStorage.removeItem(k);
-      }
-    }
-  } catch {}
-}
-
-function supabaseAuthStorageKeys() {
-  const keys = [];
-  try {
-    const url = String(window.SUPABASE_URL || '');
-    const m = url.match(/^https?:\/\/([^.]+)/i);
-    const ref = m ? m[1] : '';
-    if (ref) {
-      keys.push(`sb-${ref}-auth-token`);
-      keys.push(`sb-${ref}-state`);
-    }
-    // Legacy keys that may exist from older SDKs
-    keys.push('supabase.auth.token');
-  } catch {}
-  return keys;
-}
-
-const AUTH_BACKUP_KEY = 'cc-auth-backup';
-
-function backupSession(s) {
-  try {
-    if (!s?.access_token || !s?.refresh_token) return;
-    const payload = { access_token: s.access_token, refresh_token: s.refresh_token };
-    try { localStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
-    try { sessionStorage.setItem(AUTH_BACKUP_KEY, JSON.stringify(payload)); } catch {}
-    try { console.debug('[Auth][backup] stored tokens to backup'); } catch {}
-    // Cookie fallback for environments where both storages are unavailable
-    try {
-      const raw = JSON.stringify(payload);
-      if (raw && raw.length <= 3500) {
-        const secure = location.protocol === 'https:' ? '; Secure' : '';
-        document.cookie = `${encodeURIComponent(AUTH_BACKUP_KEY)}=${encodeURIComponent(raw)}; path=/; SameSite=Lax${secure}`;
-      }
-    } catch {}
-  } catch {}
-}
-
-function clearSessionBackup() {
-  try { localStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
-  try { sessionStorage.removeItem(AUTH_BACKUP_KEY); } catch {}
-  try { document.cookie = `${encodeURIComponent(AUTH_BACKUP_KEY)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
-}
-
-async function tryRestoreSessionFromBackup() {
-  try {
-    const cur = await sb.auth.getSession().then(r=>r?.data?.session || null).catch(()=>null);
-    if (cur) return false;
-    try { console.debug('[Auth][restore] attempting from backup'); } catch {}
-    let raw = null;
-    try { raw = localStorage.getItem(AUTH_BACKUP_KEY); } catch {}
-    if (!raw) { try { raw = sessionStorage.getItem(AUTH_BACKUP_KEY); } catch {} }
-    if (!raw) {
-      try {
-        const parts = (document.cookie || '').split('; ').filter(Boolean);
-        const pref = `${encodeURIComponent(AUTH_BACKUP_KEY)}=`;
-        const row = parts.find(p => p.startsWith(pref));
-        if (row) raw = decodeURIComponent(row.substring(pref.length));
-      } catch {}
-    }
-    if (!raw) return false;
-    let parsed = null;
-    try { parsed = JSON.parse(raw); } catch { return false; }
-    if (!parsed?.access_token || !parsed?.refresh_token) return false;
-    const { data, error } = await sb.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token });
-    if (error) { try { console.warn('[Auth] setSession from backup failed', error.message || error); } catch {} ; return false; }
-    const ok = !!data?.session;
-    try { console.debug('[Auth][restore] success:', ok); } catch {}
-    return ok;
-  } catch { return false; }
-}
-
-function clearSupabaseAuthStorageKeys() {
-  try {
-    const keys = supabaseAuthStorageKeys();
-    keys.forEach(k => {
-      try { localStorage.removeItem(k); } catch {}
-      try { sessionStorage.removeItem(k); } catch {}
-      try { document.cookie = `${encodeURIComponent(k)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
-    });
-  } catch {}
-}
-
-async function signInWithTimeout(email, password, timeoutMs) {
-  const start = Date.now();
-  function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
-  try {
-    const race = await Promise.race([
-      (async () => {
-        try { return await sb.auth.signInWithPassword({ email, password }); } catch (e) { return { data: null, error: e }; }
-      })(),
-      (async () => { await delay(timeoutMs); return { __timeout: true }; })()
-    ]);
-    if (race && race.__timeout) {
-      // If timed out, poll briefly to see if session actually exists
-      const deadline = start + timeoutMs + 3000;
-      while (Date.now() < deadline) {
-        try {
-          const { data: { session: s } } = await sb.auth.getSession();
-          if (s) { return { data: { session: s }, error: null }; }
-        } catch {}
-        await delay(250);
-      }
-      return { data: null, error: new Error('Sign in timed out') };
-    }
-    return race;
-  } catch (e) {
-    return { data: null, error: e };
-  }
 }
 
 async function getCurrentUserSafe() {
@@ -1321,10 +571,7 @@ async function getCurrentUserSafe() {
 
 async function ensureProfile(usernameFromSignup) {
   const meUser = await getCurrentUserSafe();
-  if (!meUser) {
-    try { console.warn('ensureProfile: no session'); } catch {}
-    return;
-  }
+  if (!meUser) throw new Error('No session');
   const { data: me, error } = await sb.from('profiles').select('*').eq('id', meUser.id).single();
   if (error && error.code !== 'PGRST116') { // not found
     console.error('insert profile err', error);
@@ -1340,7 +587,6 @@ async function ensureProfile(usernameFromSignup) {
   meProfile = me;
   meUsername.textContent = meProfile?.username || 'Me';
   setAvatar(meAvatar, meProfile?.username || 'Me', meProfile?.avatar_url);
-  try { if (meAvatar && currentUser?.id) { meAvatar.dataset.userId = currentUser.id; decorateAvatarWithStory(meAvatar, currentUser.id); } } catch {}
 }
 
 async function ensurePasscode() {
@@ -1388,550 +634,21 @@ async function setPresence(online) {
     await sb.from('profiles').update(payload).eq('id', meUser.id);
     // Reflect in UI immediately
     if (meStatus) meStatus.textContent = online ? 'Online' : 'Offline';
-    try { meSection?.classList.toggle('online', !!online); } catch {}
-    // Broadcast presence instantly to other clients
-    try {
-      ensurePresenceBus();
-      presenceBus.send({ type: 'broadcast', event: 'presence', payload: { id: meUser.id, is_online: !!online, last_active: payload.last_active } });
-    } catch {}
   } catch {}
-}
-let userListChan = null;
-const unreadCountByPeer = new Map();
-// Typing indicator: realtime bus and state
-let typingBus = null;
-const typingTimers = new Map(); // peerId -> timeout id for list indicator
-let convoTypingEl = null;
-let convoTypingTimer = null;
-let typingLastSentAt = 0;
-let presenceBus = null; // realtime presence broadcast channel
-
-// Typing helpers (conversation + list)
-function ensureConvoTypingEl() {
-  try {
-    if (!convoTypingEl) {
-      // Reuse existing node if present
-      convoTypingEl = document.getElementById('convo-typing') || document.createElement('div');
-      if (!convoTypingEl.id) convoTypingEl.id = 'convo-typing';
-      convoTypingEl.className = 'typing-indicator';
-      convoTypingEl.textContent = 'Typing…';
-      convoTypingEl.style.display = 'none';
-      // Place just below messages
-      const container = messagesEl?.parentElement || document.querySelector('.conversation');
-      if (container && !document.getElementById('convo-typing')) {
-        container.appendChild(convoTypingEl);
-      }
-    }
-  } catch {}
-}
-
-function showConversationTypingIndicator() {
-  try {
-    ensureConvoTypingEl();
-    if (!convoTypingEl) return;
-    convoTypingEl.style.display = '';
-    // Auto-hide after 3s of inactivity
-    if (convoTypingTimer) clearTimeout(convoTypingTimer);
-    convoTypingTimer = setTimeout(() => { hideConversationTypingIndicator(); }, 3000);
-  } catch {}
-}
-
-function hideConversationTypingIndicator() {
-  try {
-    if (convoTypingTimer) { clearTimeout(convoTypingTimer); convoTypingTimer = null; }
-    if (convoTypingEl) convoTypingEl.style.display = 'none';
-  } catch {}
-}
-
-function showTypingInList(peerId) {
-  try {
-    const li = userList?.querySelector(`li[data-user-id="${peerId}"]`);
-    if (!li) return;
-    const statusEl = li.querySelector('.status');
-    if (!statusEl) return;
-    statusEl.textContent = 'Typing…';
-    // Reset previous timer
-    const prev = typingTimers.get(peerId);
-    if (prev) clearTimeout(prev);
-    // After 2.5s, revert to presence/recency text
-    const t = setTimeout(() => {
-      try {
-        const lastRaw = li.dataset.lastActive || '';
-        // If presence monitor will update imminently, keep as-is; otherwise revert gracefully
-        const uid = String(peerId);
-        const lastHb = presenceHeartbeats.get(uid) || 0;
-        const online = (Date.now() - lastHb) <= 2500;
-        statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
-      } catch {}
-    }, 2500);
-    typingTimers.set(peerId, t);
-  } catch {}
-}
-
-async function emitTyping() {
-  try {
-    if (!currentUser || !activePeerId) return;
-    const now = Date.now();
-    if (now - typingLastSentAt < 1200) return; // throttle ~1.2s
-    typingLastSentAt = now;
-    ensureTypingBus();
-    typingBus?.send({ type: 'broadcast', event: 'typing', payload: { from: currentUser.id, to: activePeerId } });
-  } catch {}
-}
-let presenceBusHeartbeatTimer = null;
-let presenceBusMonitorTimer = null;
-const presenceHeartbeats = new Map(); // userId -> last seen ms
-let presenceActivityHandlerBound = false;
-let lastActivityHbSentAt = 0;
-const presenceMisses = new Map(); // userId -> consecutive offline checks
-let presenceActivityHandlerFn = null;
-const presenceFirstSeenAt = new Map(); // userId -> first time we rendered/observed this user
-const PRESENCE_DEBUG = false; // flip to true to see detailed presence logs
-function dbgPresence(...args) { try { if (PRESENCE_DEBUG) console.debug('[presence]', ...args); } catch {} }
-
-// Presence realtime and lifecycle
-let presenceChan = null;
-let presenceHeartbeat = null;
-let presenceHandlersBound = false;
-let presenceRecencyTicker = null;
-let presencePolling = null;
-
-// Treat a user as online if explicit flag is true OR last_active is recent
-function isOnlineFrom(u) {
-  try {
-    const last = u?.last_active ? new Date(u.last_active).getTime() : 0;
-    const recent = last && (Date.now() - last) < 5 * 1000; // 5s window for snappy UX
-    return !!(u?.is_online || recent);
-  } catch { return !!u?.is_online; }
-}
-
-function updatePresenceUIForUser(u) {
-  try {
-    // Update user list dot and status text (if status shows presence, not a message snippet)
-    const li = userList?.querySelector(`li[data-user-id="${u.id}"]`);
-    if (li) {
-      // persist latest raw values for recency ticker
-      if (typeof u.last_active !== 'undefined') li.dataset.lastActive = u.last_active || '';
-      if (typeof u.is_online !== 'undefined') li.dataset.isOnline = String(!!u.is_online);
-      // If we've seen a recent heartbeat (or within warmup) for this user, prefer that over DB payload to prevent flicker
-      const uid = String(u.id);
-      const now = Date.now();
-      const lastHb = presenceHeartbeats.get(uid) || 0;
-      const hbOnline = (now - lastHb) <= 2500;
-      const firstSeen = presenceFirstSeenAt.get(uid) || 0;
-      const inWarmup = firstSeen && (now - firstSeen) < 3000;
-      const online = hbOnline || inWarmup ? true : isOnlineFrom(u);
-      const dot = li.querySelector('.status-dot');
-      if (dot) {
-        dot.classList.toggle('online', online);
-        dot.classList.toggle('offline', !online);
-        dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
-      }
-      const statusEl = li.querySelector('.status');
-      if (statusEl) {
-        const cur = statusEl.textContent || '';
-        const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
-        if (!isSnippet) {
-          statusEl.textContent = online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
-        }
-      }
-    }
-    // Update conversation header if this is the active peer
-    if (activePeerId && u.id === activePeerId) updatePeerHeader(u);
-  } catch {}
-}
-
-function subscribePresence() {
-  try {
-    if (presenceChan) return;
-    presenceChan = sb.channel('presence-profiles')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles' }, (p) => {
-        const u = p?.new; if (!u || !u.id) return; updatePresenceUIForUser(u);
-      })
-      .subscribe((status) => {
-        try {
-          if (status === 'SUBSCRIBED') {
-            // Send a heartbeat immediately after the channel is ready so peers don't see a gray gap
-            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } });
-          }
-        } catch {}
-      });
-  } catch (e) { console.warn('subscribePresence failed', e); }
-}
-
-function teardownPresence() {
-  try { if (presenceChan) { sb.removeChannel(presenceChan); presenceChan = null; } } catch {}
-  try { if (presenceHeartbeat) { clearInterval(presenceHeartbeat); presenceHeartbeat = null; } } catch {}
-  stopPresenceRecencyTicker();
-  stopPresencePolling();
-  try { if (presenceBus) { sb.removeChannel(presenceBus); presenceBus = null; } } catch {}
-  stopPresenceBusHeartbeat();
-  stopPresenceBusMonitor();
-  stopPresenceActivityPings();
-  try { presenceHeartbeats.clear(); } catch {}
-  try { presenceMisses.clear(); } catch {}
-  try { presenceFirstSeenAt.clear(); } catch {}
-}
-
-function bindPresenceWindowHandlers() {
-  try {
-    if (presenceHandlersBound) return; presenceHandlersBound = true;
-    try {
-      document.addEventListener('visibilitychange', () => {
-        try {
-          if (document.visibilityState === 'visible') {
-            setPresence(true);
-          } else {
-            // Do not immediately set offline on hide; rely on heartbeats and unload
-          }
-        } catch {}
-      });
-      const bye = () => {
-        try { ensurePresenceBus(); dbgPresence('send bye'); presenceBus?.send({ type: 'broadcast', event: 'presence-bye', payload: { id: String(currentUser?.id || '') } }); } catch {}
-        try { navigator.sendBeacon ? navigator.sendBeacon('/') : null; } catch {}
-        try { setPresence(false); } catch {}
-      };
-      window.addEventListener('beforeunload', bye);
-      window.addEventListener('pagehide', bye);
-    } catch {}
-  } catch {}
-}
-
-function startPresenceHeartbeat() {
-  try {
-    if (presenceHeartbeat) return;
-    // More frequent heartbeat for snappier presence updates
-    presenceHeartbeat = setInterval(() => { try { setPresence(true); } catch {} }, 15 * 1000);
-  } catch {}
-}
-
-function startPresenceRecencyTicker() {
-  try {
-    if (presenceRecencyTicker) return;
-    presenceRecencyTicker = setInterval(() => {
-      try {
-        if (!userList) return;
-        userList.querySelectorAll('li[data-user-id]').forEach(li => {
-          const uid = li.dataset.userId;
-          const lastRaw = li.dataset.lastActive || '';
-          const isOnlineFlag = li.dataset.isOnline === 'true';
-          const last = lastRaw ? new Date(lastRaw).getTime() : 0;
-          const recent = last && (Date.now() - last) < 5 * 1000; // match isOnlineFrom window
-          const online = isOnlineFlag || recent;
-          const hasHb = uid ? presenceHeartbeats.has(uid) : false;
-          // Only update the dot from recency if we have never seen a heartbeat for this user
-          if (!hasHb) {
-            const dot = li.querySelector('.status-dot');
-            if (dot) {
-              dot.classList.toggle('online', online);
-              dot.classList.toggle('offline', !online);
-              dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
-            }
-          }
-          // Always keep status text fresh (unless showing a message snippet)
-          const statusEl = li.querySelector('.status');
-          if (statusEl) {
-            const cur = statusEl.textContent || '';
-            const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
-            if (!isSnippet) {
-              statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
-            }
-          }
-          // If this is the active peer, refresh the conversation header status as well
-          if (activePeerId && uid === String(activePeerId) && peerStatus) {
-            const now = Date.now();
-            const lastHb = presenceHeartbeats.get(uid) || 0;
-            const hbOnline = (now - lastHb) <= 2500;
-            const firstSeen = presenceFirstSeenAt.get(uid) || 0;
-            const inWarmup = firstSeen && (now - firstSeen) < 3000;
-            const headerOnline = hbOnline || inWarmup || online;
-            peerStatus.textContent = headerOnline ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
-          }
-        });
-      } catch {}
-    }, 1 * 1000);
-  } catch {}
-}
-
-function stopPresenceRecencyTicker() {
-  try { if (presenceRecencyTicker) { clearInterval(presenceRecencyTicker); presenceRecencyTicker = null; } } catch {}
-}
-
-function startPresencePolling() {
-  try {
-    if (presencePolling) return;
-    presencePolling = setInterval(async () => {
-      try {
-        const { data } = await sb.rpc('get_public_profiles');
-        if (!Array.isArray(data)) return;
-        const meUser = await getCurrentUserSafe();
-        data.forEach(u => {
-          if (meUser && u.id === meUser.id) return; // skip self
-          updatePresenceUIForUser(u);
-        });
-      } catch {}
-    }, 30 * 1000);
-  } catch {}
-}
-
-function stopPresencePolling() {
-  try { if (presencePolling) { clearInterval(presencePolling); presencePolling = null; } } catch {}
-}
-
-function ensureTypingBus() {
-  try {
-    if (!currentUser) return;
-    if (typingBus) return;
-    typingBus = sb.channel('typing-bus')
-      .on('broadcast', { event: 'typing' }, (p) => {
-        const payload = p?.payload || {};
-        const from = payload.from; const to = payload.to;
-        if (!from || !to) return;
-        if (!currentUser || to !== currentUser.id) return; // only if directed to me
-        // Update user list snippet to "Typing…"
-        showTypingInList(from);
-        // If active chat with that peer, show convo typing indicator
-        if (activePeerId === from && chatScreen.classList.contains('active')) {
-          showConversationTypingIndicator();
-        }
-      })
-      .subscribe((status) => {
-        try {
-          if (status === 'SUBSCRIBED') {
-            // Send an immediate heartbeat upon subscription ACK
-            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } });
-          }
-        } catch {}
-      });
-  } catch {}
-}
-
-function ensurePresenceBus() {
-  try {
-    if (!currentUser) return;
-    if (presenceBus) return;
-    presenceBus = sb.channel('presence-bus')
-      // Heartbeat packets for sub-second presence updates
-      .on('broadcast', { event: 'presence-hb' }, (p) => {
-        const uidRaw = p?.payload?.id;
-        const uid = uidRaw != null ? String(uidRaw) : '';
-        if (!uid) return;
-        dbgPresence('hb recv', { uid });
-        presenceHeartbeats.set(uid, Date.now());
-        presenceMisses.set(uid, 0);
-        if (!presenceFirstSeenAt.has(uid)) presenceFirstSeenAt.set(uid, Date.now());
-        // Also update dataset for recency fallback
-        try {
-          const li = userList?.querySelector(`li[data-user-id="${uid}"]`);
-          if (li) {
-            li.dataset.isOnline = 'true';
-            li.dataset.lastActive = new Date().toISOString();
-          }
-        } catch {}
-        // Mark online immediately in UI (fast path)
-        updatePresenceUIForUser({ id: uid, is_online: true, last_active: new Date().toISOString() });
-      })
-      .on('broadcast', { event: 'presence' }, (p) => {
-        const payload = p?.payload || {};
-        const uidRaw = payload?.id;
-        const uid = uidRaw != null ? String(uidRaw) : '';
-        if (!uid) return;
-        dbgPresence('presence recv', { uid, is_online: !!payload.is_online });
-        // If we haven't seen any heartbeat for this uid yet, seed one to bridge initial gap
-        if (!presenceHeartbeats.has(uid)) {
-          presenceHeartbeats.set(uid, Date.now());
-          presenceMisses.set(uid, 0);
-        }
-        if (!presenceFirstSeenAt.has(uid)) presenceFirstSeenAt.set(uid, Date.now());
-        // Update UI immediately using broadcast data
-        updatePresenceUIForUser({ id: uid, is_online: !!payload.is_online, last_active: payload.last_active || null });
-      })
-      .on('broadcast', { event: 'presence-bye' }, (p) => {
-        const uidRaw = p?.payload?.id;
-        const uid = uidRaw != null ? String(uidRaw) : '';
-        if (!uid) return;
-        dbgPresence('bye recv', { uid });
-        // Force immediate offline for this user
-        presenceHeartbeats.set(uid, 0);
-        presenceMisses.set(uid, 99);
-        updatePresenceUIForUser({ id: uid, is_online: false, last_active: new Date().toISOString() });
-      })
-      .subscribe((status) => {
-        try {
-          if (status === 'SUBSCRIBED') {
-            // Ensure an immediate heartbeat as soon as the bus is ready
-            dbgPresence('bus SUBSCRIBED → send immediate hb');
-            presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } });
-          }
-        } catch {}
-      });
-  } catch {}
-}
-
-function startPresenceBusHeartbeat() {
-  try {
-    if (!currentUser) return;
-    ensurePresenceBus();
-    if (presenceBusHeartbeatTimer) return;
-    // Send an immediate heartbeat, then every 1s for near-instant updates
-    try { dbgPresence('send hb immediate'); presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } }); } catch {}
-    presenceBusHeartbeatTimer = setInterval(() => {
-      try {
-        dbgPresence('send hb tick');
-        presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser.id) } });
-      } catch {}
-    }, 1000);
-  } catch {}
-}
-
-function stopPresenceBusHeartbeat() {
-  try { if (presenceBusHeartbeatTimer) { clearInterval(presenceBusHeartbeatTimer); presenceBusHeartbeatTimer = null; } } catch {}
-}
-
-function startPresenceActivityPings() {
-  try {
-    if (presenceActivityHandlerBound) return;
-    const sendActivityHb = () => {
-      const now = Date.now();
-      if (now - lastActivityHbSentAt < 2000) return; // throttle to every 2s
-      lastActivityHbSentAt = now;
-      try { presenceBus?.send({ type: 'broadcast', event: 'presence-hb', payload: { id: String(currentUser?.id || '') } }); } catch {}
-    };
-    const events = ['focus', 'mousemove', 'keydown', 'touchstart', 'scroll', 'visibilitychange'];
-    events.forEach(ev => window.addEventListener(ev, sendActivityHb, { passive: true }));
-    presenceActivityHandlerBound = true;
-    presenceActivityHandlerFn = sendActivityHb;
-  } catch {}
-}
-
-function stopPresenceActivityPings() {
-  try {
-    if (!presenceActivityHandlerBound) return;
-    const events = ['focus', 'mousemove', 'keydown', 'touchstart', 'scroll', 'visibilitychange'];
-    if (presenceActivityHandlerFn) {
-      events.forEach(ev => window.removeEventListener(ev, presenceActivityHandlerFn));
-    }
-    presenceActivityHandlerBound = false;
-  } catch {}
-}
-
-function startPresenceBusMonitor() {
-  try {
-    if (presenceBusMonitorTimer) return;
-    // Every 1s, mark users offline if no heartbeat in last ~2–3s
-    presenceBusMonitorTimer = setInterval(() => {
-      try {
-        if (!userList) return;
-        const now = Date.now();
-        userList.querySelectorAll('li[data-user-id]').forEach(li => {
-          const uid = li.dataset.userId;
-          if (!uid) return;
-          const last = presenceHeartbeats.get(uid) || 0;
-          const hbOnline = (now - last) <= 2500; // strict but tolerant window (~1–2s target)
-          // Only use recency if we have NEVER seen a heartbeat for this uid
-          const seenHb = presenceHeartbeats.has(uid);
-          const recencyOnline = !seenHb && isOnlineFrom({ id: uid, is_online: li.dataset.isOnline === 'true', last_active: li.dataset.lastActive || '' });
-          // Base decision from heartbeat or (if never seen HB) recency
-          const baseOnline = hbOnline || recencyOnline;
-          // One-miss hysteresis: don't flip offline on the first miss to avoid jitter flicker
-          let online = baseOnline;
-          if (!baseOnline) {
-            // Warmup: do not allow offline within the first 3s of seeing this user
-            const first = presenceFirstSeenAt.get(uid) || 0;
-            if (first && (now - first) < 3000) {
-              online = true;
-              presenceMisses.set(uid, 0);
-            } else {
-              const misses = (presenceMisses.get(uid) || 0) + 1;
-              presenceMisses.set(uid, misses);
-              if (misses < 2) online = true; // keep online for one interval
-            }
-          } else {
-            presenceMisses.set(uid, 0);
-          }
-          dbgPresence('mon', { uid, delta: now - last, hbOnline, seenHb, recencyOnline, baseOnline, online, misses: presenceMisses.get(uid) || 0 });
-          const dot = li.querySelector('.status-dot');
-          if (dot) {
-            dot.classList.toggle('online', online);
-            dot.classList.toggle('offline', !online);
-            dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
-          }
-          const statusEl = li.querySelector('.status');
-          if (statusEl) {
-            const cur = statusEl.textContent || '';
-            const isSnippet = cur.startsWith('You:') || cur.startsWith('Received:');
-            if (!isSnippet) {
-              // If offline, keep last_active fallback text if we have it
-              const lastRaw = li.dataset.lastActive || '';
-              statusEl.textContent = online ? 'Active now' : (lastRaw ? formatTimeAgo(lastRaw) : 'Offline');
-            }
-          }
-        });
-      } catch {}
-    }, 1000);
-  } catch {}
-}
-
-function stopPresenceBusMonitor() {
-  try { if (presenceBusMonitorTimer) { clearInterval(presenceBusMonitorTimer); presenceBusMonitorTimer = null; } } catch {}
-}
-
-function teardownTypingBus() {
-  try { if (typingBus) { sb.removeChannel(typingBus); typingBus = null; } } catch {}
-  typingTimers.forEach((t) => clearTimeout(t)); typingTimers.clear();
-  hideConversationTypingIndicator();
 }
 
 async function loadUsers() {
   if (!userList) return;
   userList.innerHTML = '';
   try {
+    // Prefer secure view via RPC
     const { data, error } = await sb.rpc('get_public_profiles');
     if (error) throw error;
     const meUser = await getCurrentUserSafe();
-    const peers = (data || []).filter(u => !meUser || u.id !== meUser.id);
-    // Fetch latest messages for all peers in two batched queries (outgoing and incoming)
-    let lastByPeer = new Map();
-    if (meUser && peers.length) {
-      const peerIds = peers.map(u => u.id);
-      const sel = 'sender_id,receiver_id,content,type,created_at';
-      const [outRes, inRes] = await Promise.all([
-        sb.from('messages').select(sel).eq('sender_id', meUser.id).in('receiver_id', peerIds).order('created_at', { ascending: false }),
-        sb.from('messages').select(sel).eq('receiver_id', meUser.id).in('sender_id', peerIds).order('created_at', { ascending: false })
-      ]);
-      const combine = (rows, incoming) => {
-        (rows?.data || []).forEach(m => {
-          const peerId = incoming ? m.sender_id : m.receiver_id;
-          const prev = lastByPeer.get(peerId);
-          if (!prev || new Date(m.created_at) > new Date(prev.created_at)) {
-            lastByPeer.set(peerId, { ...m, incoming });
-          }
-        });
-      };
-      combine(outRes, false); // messages you sent
-      combine(inRes, true);   // messages you received
-    }
-
-    // Build initial unread counts (one query)
-    if (meUser && peers.length) {
-      try {
-        const peerIds = peers.map(u => u.id);
-        const { data: unseenRows } = await sb.from('messages')
-          .select('sender_id')
-          .eq('receiver_id', meUser.id)
-          .in('sender_id', peerIds)
-          .is('seen_at', null);
-        unreadCountByPeer.clear();
-        (unseenRows || []).forEach(r => {
-          const n = unreadCountByPeer.get(r.sender_id) || 0;
-          unreadCountByPeer.set(r.sender_id, n + 1);
-        });
-      } catch (e) { console.warn('init unread failed', e); }
-    }
-
-    peers.forEach(u => {
+    (data || [])
+      .filter(u => !meUser || u.id !== meUser.id)
+      .forEach(u => {
         const li = document.createElement('li');
-        li.dataset.userId = u.id;
         li.innerHTML = `
           <div class="avatar"></div>
           <div class="info">
@@ -1939,52 +656,9 @@ async function loadUsers() {
             <div class="status"></div>
           </div>
         `;
-        const av = li.querySelector('.avatar');
-        setAvatar(av, u.username || 'User', u.avatar_url);
-        // Append presence dot
-        const dot = document.createElement('div');
-        const online = isOnlineFrom(u);
-        dot.className = 'status-dot ' + (online ? 'online' : 'offline');
-        dot.setAttribute('aria-label', online ? 'Online' : 'Offline');
-        av.appendChild(dot);
-        // Seed heartbeat for users initially evaluated as online so the monitor doesn't flip them
-        if (online) { try { presenceHeartbeats.set(String(u.id), Date.now()); } catch {} }
-        // Unread badge
-        const badge = document.createElement('span');
-        badge.className = 'unread-badge';
-        badge.hidden = true;
-        av.appendChild(badge);
+        setAvatar(li.querySelector('.avatar'), u.username || 'User', u.avatar_url);
         li.querySelector('.name').textContent = u.username || 'User';
-        // Last message snippet
-        const last = lastByPeer.get(u.id);
-        const statusEl = li.querySelector('.status');
-        if (last) {
-          const isIncoming = !!last.incoming;
-          const prefix = isIncoming ? 'Received: ' : 'You: ';
-          let snippet = '';
-          const t = (last.type || 'text');
-          const isDel = (t === 'deleted') || (last.content === '::deleted::');
-          if (isDel) {
-            snippet = 'This message was deleted';
-          } else if (t === 'text') {
-            const text = (last.content || '').replace(/\s+/g, ' ').trim();
-            snippet = text.length > 42 ? text.slice(0, 42) + '…' : text;
-          } else if (t === 'image') snippet = '[Photo]';
-          else if (t === 'video') snippet = '[Video]';
-          else if (t === 'gif') snippet = '[GIF]';
-          else if (t === 'audio') snippet = '[Audio]';
-          else snippet = '[Attachment]';
-          statusEl.textContent = prefix + snippet;
-        } else {
-          // Fallback to presence/last active
-          statusEl.textContent = online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
-        }
-        // Persist raw values for recency ticker
-        li.dataset.lastActive = u.last_active || '';
-        li.dataset.isOnline = String(!!u.is_online);
-        // Set initial unread
-        const uc = unreadCountByPeer.get(u.id) || 0;
-        applyUnreadBadge(li, uc);
+        li.querySelector('.status').textContent = u.is_online ? 'Active now' : (u.last_active ? formatTimeAgo(u.last_active) : 'Offline');
         li.addEventListener('click', () => openConversation(u.id));
         userList.appendChild(li);
       });
@@ -1993,108 +667,11 @@ async function loadUsers() {
   }
 }
 
-function formatListSnippetFromRow(m, meId) {
-  if (!m) return '';
-  const incoming = m.receiver_id === meId; // if me is receiver, it's incoming
-  const prefix = incoming ? 'Received: ' : 'You: ';
-  const t = (m.type || 'text');
-  const isDel = (t === 'deleted') || (m.content === '::deleted::');
-  let body = '';
-  if (isDel) body = 'This message was deleted';
-  else if (t === 'text') {
-    const text = (m.content || '').replace(/\s+/g, ' ').trim();
-    body = text.length > 42 ? text.slice(0, 42) + '…' : text;
-  } else if (t === 'image') body = '[Photo]';
-  else if (t === 'video') body = '[Video]';
-  else if (t === 'gif') body = '[GIF]';
-  else if (t === 'audio') body = '[Audio]';
-  else body = '[Attachment]';
-  return prefix + body;
-}
-
-function updateUserListItemSnippet(peerId, row) {
-  try {
-    const li = userList?.querySelector(`li[data-user-id="${peerId}"]`);
-    if (!li) return;
-    const status = li.querySelector('.status');
-    if (!status) return;
-    status.textContent = formatListSnippetFromRow(row, currentUser?.id);
-  } catch {}
-}
-
-function subscribeUserListMessages() {
-  try {
-    if (!currentUser) return;
-    if (userListChan) { sb.removeChannel(userListChan); userListChan = null; }
-    const meId = currentUser.id;
-    userListChan = sb.channel('inbox-overview')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `sender_id=eq.${meId}` }, (p) => {
-        const m = p.new; if (!m) return; updateUserListItemSnippet(m.receiver_id, m);
-      })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `receiver_id=eq.${meId}` }, (p) => {
-        const m = p.new; if (!m) return; updateUserListItemSnippet(m.sender_id, m); refreshUnreadForPeer(m.sender_id);
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `sender_id=eq.${meId}` }, (p) => {
-        const m = p.new; if (!m) return; updateUserListItemSnippet(m.receiver_id, m);
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages', filter: `receiver_id=eq.${meId}` }, (p) => {
-        const m = p.new; if (!m) return; updateUserListItemSnippet(m.sender_id, m); refreshUnreadForPeer(m.sender_id);
-      })
-      .subscribe();
-  } catch (e) { console.warn('subscribeUserListMessages failed', e); }
-}
-
-function applyUnreadBadge(li, count) {
-  try {
-    const badge = li.querySelector('.unread-badge');
-    if (!badge) return;
-    if (count > 0) {
-      badge.hidden = false;
-      badge.textContent = count > 9 ? '9+' : String(count);
-    } else {
-      badge.hidden = true;
-      badge.textContent = '';
-    }
-  } catch {}
-}
-
-function setUnreadBadge(peerId, count) {
-  unreadCountByPeer.set(peerId, count);
-  const li = userList?.querySelector(`li[data-user-id="${peerId}"]`);
-  if (li) applyUnreadBadge(li, count);
-}
-
-async function refreshUnreadForPeer(peerId) {
-  try {
-    if (!currentUser) return;
-    const { count } = await sb.from('messages')
-      .select('id', { count: 'exact', head: true })
-      .eq('receiver_id', currentUser.id)
-      .eq('sender_id', peerId)
-      .is('seen_at', null);
-    setUnreadBadge(peerId, count || 0);
-  } catch (e) { console.warn('refreshUnreadForPeer failed', e); }
-}
-
 async function enterChat() {
   // Navigate to chat screen, set presence, and load user list
   show(chatScreen);
   await setPresence(true);
   await loadUsers();
-  // Start realtime updates for inbox previews (last message per user)
-  subscribeUserListMessages();
-  // Presence realtime + lifecycle
-  subscribePresence();
-  ensurePresenceBus();
-  bindPresenceWindowHandlers();
-  startPresenceHeartbeat();
-  startPresenceRecencyTicker();
-  startPresencePolling();
-  startPresenceBusHeartbeat();
-  startPresenceBusMonitor();
-  startPresenceActivityPings();
-  // Load stories bar once in chat
-  try { await loadStories(); subscribeStories(); } catch (e) { console.warn('stories init failed', e); }
 }
 
 async function openConversation(peerId) {
@@ -2112,7 +689,6 @@ async function openConversation(peerId) {
   messagesEl.innerHTML = '';
   // Mobile: switch to conversation view
   chatScreen.classList.add('show-convo');
-  try { document.body.classList.add('chat-inbox'); } catch {}
   // Fetch recent messages between me and peer
   const { data, error } = await sb
     .from('messages')
@@ -2123,11 +699,8 @@ async function openConversation(peerId) {
   if (!error) data.forEach(renderMessage);
   // After rendering, mark any unseen/un-delivered messages for this open chat
   await bulkMarkDeliveredAndSeenForOpenConversation();
-  // Clear unread badge for this peer in the user list immediately
-  try { setUnreadBadge(activePeerId, 0); } catch {}
   updateDeliveryStatus();
   subscribeMessages();
-  ensureTypingBus();
 }
 
 function subscribeMessages() {
@@ -2140,7 +713,6 @@ function subscribeMessages() {
         renderMessage(p.new);
         // Mark delivered and seen if appropriate
         markDeliveredAndMaybeSeen(p.new);
-        hideConversationTypingIndicator();
       }
     })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `sender_id=eq.${currentUser.id}` }, (p) => {
@@ -2278,15 +850,7 @@ function renderMessage(m, { replace = false } = {}) {
   const meta = document.createElement('div');
   meta.className = 'meta';
   const ts = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  let edited = false;
-  try {
-    if (m.updated_at) {
-      const cu = new Date(m.created_at).getTime();
-      const uu = new Date(m.updated_at).getTime();
-      // Consider edited only if meaningfully later (>2s) to avoid default updated_at on insert
-      edited = isFinite(cu) && isFinite(uu) && (uu - cu) > 2000;
-    }
-  } catch {}
+  const edited = m.updated_at && m.updated_at !== m.created_at; // show if column exists
   meta.textContent = ts + (edited ? ' (edited)' : '');
   // Force color to white to ensure visibility regardless of theme overrides
   try { meta.style.color = '#ffffff'; } catch {}
@@ -2527,9 +1091,8 @@ function startInlineEdit(el, m) {
       m.content = newText;
       try { m.updated_at = new Date().toISOString(); } catch {}
       area.replaceWith(createTextDiv(newText));
+      const meta = el.querySelector('.meta'); if (meta && !/edited\)/.test(meta.textContent)) meta.textContent += ' (edited)';
       messagesById.set(m.id, m);
-      // Re-render to update meta with edited timestamp logic
-      renderMessage(m, { replace: true });
       refreshReplyPreviewsFor(m.id);
       if (replyTarget?.id === m.id) { updateReplyBar(); }
     }
@@ -2621,7 +1184,6 @@ msgForm.addEventListener('submit', async (e) => {
   // clear reply state after send
   replyTarget = null; updateReplyBar();
   msgInput.value = '';
-  hideConversationTypingIndicator();
 });
 
 // Image sending
@@ -2701,14 +1263,8 @@ if (btnAttach && imageInput) {
 // Auth state listener to handle email confirmation and sign-ins
 if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
   sb.auth.onAuthStateChange(async (event, s) => {
-    try { console.debug('[Auth] onAuthStateChange', event, 'hasSession:', !!s, 'userId:', s?.user?.id || null); } catch {}
-    if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
-      try { backupSession(s); } catch {}
-    }
     if (event === 'SIGNED_IN') {
-      try { backupSession(s); } catch {}
       await refreshSession();
-      ensureTypingBus();
       await ensureProfile();
       setLoggedInUI(true);
       if (authModal?.close) authModal.close();
@@ -2727,10 +1283,7 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
       show(calculatorScreen);
     }
     if (event === 'SIGNED_OUT') {
-      try { clearSessionBackup(); } catch {}
       session = null; currentUser = null; meProfile = null;
-      teardownTypingBus();
-      teardownPresence();
       setLoggedInUI(false);
       show(calculatorScreen);
     }
@@ -2740,10 +1293,13 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
 (async function init() {
   // Enforce dark mode by default
   applyTheme('dark');
-  try { await healAuthIfCorrupted(); } catch {}
-  // If storage was purged or corrupted, try to restore from backup tokens
-  try { await tryRestoreSessionFromBackup(); } catch {}
   try { await refreshSession(); } catch { /* ignore */ }
+  setLoggedInUI(!!currentUser);
+  // If already signed in (page reload), load profile so username/avatar render
+  if (currentUser) {
+    await ensureProfile();
+  }
+  show(calculatorScreen);
 })();
 
 // Ensure listeners are bound even if DOM was not fully ready
@@ -2755,35 +1311,11 @@ document.addEventListener('DOMContentLoaded', () => {
   if (btn && dlg && typeof dlg.showModal === 'function') {
     if (!btn.__cc_bound) { btn.addEventListener('click', () => dlg.showModal()); btn.__cc_bound = true; }
   }
-  // Reset auth helper (for stuck mobile states)
-  const resetBtn = document.getElementById('btn-auth-reset');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', async () => {
-      try { console.debug('[Auth] manual reset triggered'); } catch {}
-      try { await signOutWithTimeout(); } catch {}
-      try { clearSessionBackup(); } catch {}
-      try {
-        const keys = (supabaseAuthStorageKeys && supabaseAuthStorageKeys()) || [];
-        try { console.debug('[Auth] clearing keys:', keys); } catch {}
-      } catch {}
-      try { clearSupabaseAuthStorageKeys(); } catch {}
-      try { await forceLocalAuthReset(); } catch {}
-      toast('success','Auth reset','Local auth cache cleared. Try signing in again.');
-    });
-  }
   // Chat textarea auto-grow
   const ta = document.getElementById('message-input');
   if (ta) {
     try { autoSize(ta); } catch {}
   }
-  // Typing emit wiring
-  try {
-    if (msgInput) {
-      msgInput.addEventListener('input', emitTyping);
-      msgInput.addEventListener('focus', emitTyping);
-      msgInput.addEventListener('blur', () => { typingLastSentAt = 0; });
-    }
-  } catch {}
   // GIF picker wiring
   try {
     if (btnGif && gifModal && typeof gifModal.showModal === 'function') {
@@ -2818,30 +1350,10 @@ document.addEventListener('DOMContentLoaded', () => {
   } catch {}
 });
 
-// Stories UI wiring
-try {
-  if (btnAddStory && addStoryModal && typeof addStoryModal.showModal === 'function') {
-    btnAddStory.addEventListener('click', async () => {
-      await refreshSession();
-      if (!currentUser) { toast('error','Not signed in','Sign in to post a story.'); return; }
-      addStoryModal.showModal();
-    });
-  }
-  if (addStoryCancel && addStoryModal) addStoryCancel.addEventListener('click', () => addStoryModal.close());
-  if (addStoryForm) addStoryForm.addEventListener('submit', handleAddStorySubmit);
-  if (svPrev) svPrev.addEventListener('click', () => nextStory(-1));
-  if (svNext) svNext.addEventListener('click', () => nextStory(1));
-  if (svCloseBtn && storyViewer) svCloseBtn.addEventListener('click', () => { try { if (svVideo) svVideo.pause(); } catch {} storyViewer.close(); });
-  if (storyViewer) storyViewer.addEventListener('click', (e) => { if (e.target === storyViewer) { try { if (svVideo) svVideo.pause(); } catch {} storyViewer.close(); } });
-  if (svReplySend) svReplySend.addEventListener('click', async () => { const v = svReplyInput?.value || ''; await sendStoryReply(v); if (svReplyInput) svReplyInput.value=''; });
-  if (svReplyInput) svReplyInput.addEventListener('keydown', async (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = svReplyInput.value; await sendStoryReply(v); svReplyInput.value=''; } });
-} catch {}
-
 // Mobile back button: return to user list
 if (btnBack) {
   btnBack.addEventListener('click', () => {
     chatScreen.classList.remove('show-convo');
-    try { document.body.classList.remove('chat-inbox'); } catch {}
     activePeerId = null;
   });
 }
