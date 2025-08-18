@@ -1106,6 +1106,15 @@ btnSignin.addEventListener('click', async () => {
     } catch {}
     const { data, error } = await signInWithTimeout(email, password, 15000);
     if (error) { throw error; }
+    // Fallback: if session is already available, ensure UI updates even if onAuthStateChange is delayed
+    if (data?.session) {
+      await refreshSession();
+      ensureTypingBus();
+      await ensureProfile();
+      setLoggedInUI(true);
+      if (authModal?.close) authModal.close();
+      toast('success','Signed in', 'Welcome back!');
+    }
     // onAuthStateChange listener will proceed
   } catch (e) {
     authError.textContent = e?.message || 'Sign in failed'; authError.hidden = false; toast('error','Sign in failed', authError.textContent);
@@ -1157,11 +1166,18 @@ function validateSupabaseStorageJSON() {
   try {
     const keys = supabaseAuthStorageKeys();
     for (const k of keys) {
-      const v = localStorage.getItem(k);
+      let v = null; let where = 'localStorage';
+      try { v = localStorage.getItem(k); } catch {}
+      if (v == null) {
+        where = 'sessionStorage';
+        try { v = sessionStorage.getItem(k); } catch {}
+      }
       if (v == null) continue;
       try { JSON.parse(v); } catch (e) {
-        try { console.warn('[Auth] Invalid JSON in', k, '-> clearing'); } catch {}
-        localStorage.removeItem(k);
+        try { console.warn('[Auth] Invalid JSON in', k, 'in', where, '-> clearing'); } catch {}
+        try { localStorage.removeItem(k); } catch {}
+        try { sessionStorage.removeItem(k); } catch {}
+        try { deleteCookie(k); } catch {}
       }
     }
   } catch {}
@@ -1175,10 +1191,23 @@ function supabaseAuthStorageKeys() {
     const ref = m ? m[1] : '';
     if (ref) {
       keys.push(`sb-${ref}-auth-token`);
-      keys.push(`sb-${ref}-state`);
+      keys.push(`sb-${ref}-auth-state`);
+      keys.push(`sb-${ref}-auth-debug`);
     }
     // Legacy keys that may exist from older SDKs
     keys.push('supabase.auth.token');
+    // Scan existing storage for any sb-* auth keys to be safe
+    const collect = (store) => {
+      try {
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i);
+          if (!k) continue;
+          if (k.startsWith('sb-') && k.includes('auth')) keys.push(k);
+        }
+      } catch {}
+    };
+    try { collect(localStorage); } catch {}
+    try { collect(sessionStorage); } catch {}
   } catch {}
   return keys;
 }
@@ -1186,8 +1215,16 @@ function supabaseAuthStorageKeys() {
 function clearSupabaseAuthStorageKeys() {
   try {
     const keys = supabaseAuthStorageKeys();
-    keys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+    keys.forEach(k => {
+      try { localStorage.removeItem(k); } catch {}
+      try { sessionStorage.removeItem(k); } catch {}
+      try { deleteCookie(k); } catch {}
+    });
   } catch {}
+}
+
+function deleteCookie(name) {
+  try { document.cookie = `${encodeURIComponent(name)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
 }
 
 async function signInWithTimeout(email, password, timeoutMs) {
@@ -2606,6 +2643,19 @@ if (btnAttach && imageInput) {
 if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
   sb.auth.onAuthStateChange(async (event, s) => {
     try { console.debug('[Auth] onAuthStateChange', event, 'hasSession:', !!s, 'userId:', s?.user?.id || null); } catch {}
+    // Treat INITIAL_SESSION with a valid session the same as SIGNED_IN
+    if (event === 'INITIAL_SESSION' && s) {
+      try {
+        session = s; currentUser = s.user;
+        await refreshSession();
+        ensureTypingBus();
+        await ensureProfile();
+        setLoggedInUI(true);
+        if (authModal?.close) authModal.close();
+        show(calculatorScreen);
+      } catch {}
+      return;
+    }
     if (event === 'SIGNED_IN') {
       await refreshSession();
       ensureTypingBus();
@@ -2626,12 +2676,23 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
       await ensurePasscode();
       show(calculatorScreen);
     }
+    // Ignore spurious SIGNED_OUTs that can occur during reload on some mobile browsers
     if (event === 'SIGNED_OUT') {
+      try {
+        const { data: { session: still } } = await sb.auth.getSession();
+        if (still) {
+          try { console.warn('[Auth] Ignoring spurious SIGNED_OUT; session still present'); } catch {}
+          return;
+        }
+      } catch {}
       session = null; currentUser = null; meProfile = null;
       teardownTypingBus();
       teardownPresence();
       setLoggedInUI(false);
       show(calculatorScreen);
+    }
+    if (event === 'TOKEN_REFRESHED') {
+      try { await refreshSession(); } catch {}
     }
   });
 }
@@ -2641,6 +2702,19 @@ if (sb && sb.auth && typeof sb.auth.onAuthStateChange === 'function') {
   applyTheme('dark');
   try { await healAuthIfCorrupted(); } catch {}
   try { await refreshSession(); } catch { /* ignore */ }
+  // Short watchdog to stabilize UI after reload on mobile if events are delayed
+  try {
+    setTimeout(async () => {
+      try {
+        await refreshSession();
+        if (currentUser) {
+          ensureTypingBus();
+          await ensureProfile();
+          setLoggedInUI(true);
+        }
+      } catch {}
+    }, 500);
+  } catch {}
 })();
 
 // Ensure listeners are bound even if DOM was not fully ready

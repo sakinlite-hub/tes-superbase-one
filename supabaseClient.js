@@ -9,41 +9,21 @@ if (typeof window.SUPABASE_URL === 'undefined' || typeof window.SUPABASE_ANON_KE
 if (!window.supabase || !window.supabase.createClient) {
   console.error('Supabase JS SDK not loaded. Ensure <script src="https://unpkg.com/@supabase/supabase-js@2"></script> is included before this file.');
 } else {
-  // Resilient storage: prefer localStorage, fall back to cookies (helps on iOS Safari where storage can be purged on reload)
-  function setCookie(name, value, days) {
-    try {
-      const d = new Date();
-      d.setTime(d.getTime() + (days*24*60*60*1000));
-      const expires = 'expires=' + d.toUTCString();
-      document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value || '')};${expires};path=/;SameSite=Lax`;
-    } catch {}
-  }
-  function getCookie(name) {
-    try {
-      const n = encodeURIComponent(name) + '=';
-      const ca = document.cookie.split(';');
-      for (let c of ca) {
-        while (c.charAt(0) === ' ') c = c.substring(1);
-        if (c.indexOf(n) === 0) return decodeURIComponent(c.substring(n.length, c.length));
-      }
-    } catch {}
-    return null;
-  }
-  function delCookie(name) {
-    try { document.cookie = `${encodeURIComponent(name)}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`; } catch {}
-  }
+  // Resilient storage: localStorage primary, sessionStorage fallback (avoid cookie truncation issues)
   const resilientStorage = {
     getItem: (key) => {
       try { const v = window.localStorage.getItem(key); if (v != null) return v; } catch {}
-      return getCookie(key);
+      try { return window.sessionStorage.getItem(key); } catch {}
+      return null;
     },
     setItem: (key, value) => {
-      try { window.localStorage.setItem(key, value); } catch {}
-      try { setCookie(key, value, 30); } catch {}
+      let stored = false;
+      try { window.localStorage.setItem(key, value); stored = true; } catch {}
+      if (!stored) { try { window.sessionStorage.setItem(key, value); } catch {} }
     },
     removeItem: (key) => {
       try { window.localStorage.removeItem(key); } catch {}
-      try { delCookie(key); } catch {}
+      try { window.sessionStorage.removeItem(key); } catch {}
     }
   };
 
